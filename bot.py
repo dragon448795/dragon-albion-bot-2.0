@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小雲ALBION機械人 - 完整功能版本
+小雲ALBION機械人 - 完整功能版本 (修正版)
 13個指令全部可用
 """
 
@@ -69,6 +69,10 @@ bot = commands.Bot(
     help_command=None,
     case_insensitive=True
 )
+
+# ========== 關鍵修復 ==========
+# 定義指令樹變數，與成功版本保持一致
+tree = bot.tree
 
 # ========== 資料庫設定 ==========
 DB_NAME = "bot_data.db"
@@ -550,16 +554,6 @@ async def end_evaluation(event_id, channel, event_name):
 # ========== 事件處理 ==========
 
 @bot.event
-async def setup_hook():
-    """機器人設置鉤子"""
-    print("🔄 正在設置指令樹...")
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ 指令樹設置完成，已同步 {len(synced)} 個指令")
-    except Exception as e:
-        print(f"❌ 設置指令樹失敗: {e}")
-
-@bot.event
 async def on_ready():
     """機器人上線"""
     print(f"\n{'='*60}")
@@ -570,33 +564,27 @@ async def on_ready():
     init_db()
     print("✅ 資料庫初始化完成")
     
-    # 等待一下再同步指令
-    await asyncio.sleep(2)
-    
     try:
-        print("🔄 正在同步指令...")
+        print("\n🔄 正在同步指令...")
         
-        # 先清除所有現有指令
-        bot.tree.clear_commands(guild=None)
-        
-        # 重新同步全局指令
-        synced = await bot.tree.sync()
-        
-        print(f"✅ 已同步 {len(synced)} 個指令")
+        # 修復：使用 tree 而不是 bot.tree 來同步
+        global_synced = await tree.sync()
+        print(f"✅ 已同步 {len(global_synced)} 個指令")
         
         # 顯示可用指令
-        if synced:
+        if global_synced:
             print("\n📋 可用指令:")
-            for cmd in synced:
+            for cmd in global_synced:
                 print(f"  • /{cmd.name} - {cmd.description}")
         
     except Exception as e:
         print(f"❌ 同步失敗: {e}")
-        # 如果失敗，嘗試延遲後再試一次
+        
+        # 重試一次
         try:
             await asyncio.sleep(3)
-            synced = await bot.tree.sync()
-            print(f"✅ 重試後已同步 {len(synced)} 個指令")
+            global_synced = await tree.sync()
+            print(f"✅ 重試後已同步 {len(global_synced)} 個指令")
         except Exception as e2:
             print(f"❌ 重試也失敗: {e2}")
     
@@ -1043,8 +1031,42 @@ async def on_raw_reaction_add(payload):
 
 # ========== 斜槓指令 ==========
 
-# 指令 1: help
-@bot.tree.command(name="help", description="顯示幫助訊息")
+# 指令 1: sync (擁有者)
+@tree.command(name="sync", description="同步斜槓指令（擁有者）")
+async def sync_slash(interaction: discord.Interaction):
+    """同步指令"""
+    await interaction.response.defer(ephemeral=True)
+    
+    if interaction.user.id not in OWNER_IDS:
+        embed = discord.Embed(
+            title="❌ 權限不足",
+            description="只有機器人擁有者可以使用此指令",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+    
+    try:
+        print("🔄 手動同步指令中...")
+        global_synced = await tree.sync()
+        
+        embed = discord.Embed(
+            title="🔄 指令同步完成",
+            description=f"已同步 {len(global_synced)} 個指令",
+            color=0x43B581
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 同步失敗",
+            description=f"錯誤訊息: {str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
+
+# 指令 2: help
+@tree.command(name="help", description="顯示幫助訊息")
 async def help_slash(interaction: discord.Interaction):
     """顯示幫助"""
     embed = discord.Embed(
@@ -1084,43 +1106,8 @@ async def help_slash(interaction: discord.Interaction):
     embed.set_footer(text="共13個指令 | 使用 / 開頭輸入指令")
     await interaction.response.send_message(embed=embed)
 
-# 指令 2: sync
-@bot.tree.command(name="sync", description="同步斜槓指令（擁有者）")
-async def sync_slash(interaction: discord.Interaction):
-    """同步指令"""
-    await interaction.response.defer(ephemeral=True)
-    
-    if interaction.user.id not in OWNER_IDS:
-        embed = discord.Embed(
-            title="❌ 權限不足",
-            description="只有機器人擁有者可以使用此指令",
-            color=0xFF0000
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-        return
-    
-    try:
-        print("🔄 手動同步指令中...")
-        bot.tree.clear_commands(guild=None)
-        synced = await bot.tree.sync()
-        
-        embed = discord.Embed(
-            title="🔄 指令同步完成",
-            description=f"已同步 {len(synced)} 個指令到所有伺服器",
-            color=0x43B581
-        )
-        
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        error_embed = discord.Embed(
-            title="❌ 同步失敗",
-            description=f"錯誤訊息: {str(e)}",
-            color=0xFF0000
-        )
-        await interaction.followup.send(embed=error_embed, ephemeral=True)
-
 # 指令 3: profile
-@bot.tree.command(name="profile", description="查看我的數據")
+@tree.command(name="profile", description="查看我的數據")
 async def profile_slash(interaction: discord.Interaction):
     """查看用戶資料"""
     await interaction.response.defer()
@@ -1256,7 +1243,7 @@ async def profile_slash(interaction: discord.Interaction):
         await interaction.followup.send(embed=error_embed)
 
 # 指令 4: giveaway
-@bot.tree.command(name="giveaway", description="創建抽獎活動")
+@tree.command(name="giveaway", description="創建抽獎活動")
 @app_commands.describe(
     prize="獎品內容",
     duration="抽獎持續時間（例如：60s, 1m, 1h, 1d）",
@@ -1412,7 +1399,7 @@ async def giveaway_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 5: score_draw
-@bot.tree.command(name="score_draw", description="使用積分抽獎")
+@tree.command(name="score_draw", description="使用積分抽獎")
 async def score_draw_slash(interaction: discord.Interaction):
     """積分抽獎"""
     await interaction.response.defer()
@@ -1552,7 +1539,7 @@ async def score_draw_slash(interaction: discord.Interaction):
         await interaction.followup.send(embed=error_embed)
 
 # 指令 6: score_transfer
-@bot.tree.command(name="score_transfer", description="轉移積分給其他用戶")
+@tree.command(name="score_transfer", description="轉移積分給其他用戶")
 @app_commands.describe(
     user="目標用戶",
     amount="轉移積分",
@@ -1619,7 +1606,7 @@ async def score_transfer_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 7: prizelist
-@bot.tree.command(name="prizelist", description="查看彩池列表")
+@tree.command(name="prizelist", description="查看彩池列表")
 async def prizelist_slash(interaction: discord.Interaction):
     """查看彩池"""
     await interaction.response.defer()
@@ -1717,7 +1704,7 @@ async def prizelist_slash(interaction: discord.Interaction):
         await interaction.followup.send(embed=error_embed)
 
 # 指令 8: random_team
-@bot.tree.command(name="random_team", description="隨機分組")
+@tree.command(name="random_team", description="隨機分組")
 @app_commands.describe(
     team_size="每組人數",
     team_count="組數"
@@ -1869,7 +1856,7 @@ async def random_team_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 9: add_prize (管理員)
-@bot.tree.command(name="add_prize", description="添加獎品到彩池")
+@tree.command(name="add_prize", description="添加獎品到彩池")
 @app_commands.describe(
     name="獎品名稱",
     box_level="寶箱等級 (綠箱/藍箱/紫箱/金箱)",
@@ -1980,7 +1967,7 @@ async def add_prize_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 10: add_score (管理員)
-@bot.tree.command(name="add_score", description="調整用戶積分")
+@tree.command(name="add_score", description="調整用戶積分")
 @app_commands.describe(
     user="目標用戶",
     amount="積分變化（正數為增加，負數為減少）",
@@ -2033,7 +2020,7 @@ async def add_score_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 11: create_event (管理員)
-@bot.tree.command(name="create_event", description="創建評核活動")
+@tree.command(name="create_event", description="創建評核活動")
 @app_commands.describe(
     event_name="活動名稱",
     signup_time="簽到時間（分鐘）",
@@ -2238,7 +2225,7 @@ async def create_event_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 12: all_profiles (管理員)
-@bot.tree.command(name="all_profiles", description="查看所有用戶資料")
+@tree.command(name="all_profiles", description="查看所有用戶資料")
 @app_commands.describe(
     sort_by="排序方式",
     limit="顯示數量"
@@ -2425,7 +2412,7 @@ async def all_profiles_slash(
         await interaction.followup.send(embed=error_embed)
 
 # 指令 13: attendance_stats (管理員)
-@bot.tree.command(name="attendance_stats", description="查看用戶出席率統計")
+@tree.command(name="attendance_stats", description="查看用戶出席率統計")
 @app_commands.describe(
     period="統計期間",
     min_events="最低活動次數"
@@ -2608,8 +2595,8 @@ async def attendance_stats_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 額外指令: ping
-@bot.tree.command(name="ping", description="測試機器人延遲")
+# 指令 14: ping
+@tree.command(name="ping", description="測試機器人延遲")
 async def ping_slash(interaction: discord.Interaction):
     """測試延遲"""
     latency = round(bot.latency * 1000)
@@ -2627,11 +2614,11 @@ async def ping_slash(interaction: discord.Interaction):
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - 完整功能版本")
+    print(f"🚀 啟動 {BOT_NAME} - 完整功能版本 (修正版)")
     print(f"💡 主要指令: 使用 / 前綴")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
     print(f"📁 資料庫位置: {DB_NAME}")
-    print(f"📋 總指令數: 13個")
+    print(f"📋 總指令數: 14個 (含/ping)")
     print(f"{'='*50}")
     
     # 從環境變數讀取 Token
