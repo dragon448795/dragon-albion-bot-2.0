@@ -3,7 +3,7 @@
 """
 小雲ALBION機械人 - 13指令完整版本（含分頁出席率排行榜）
 已移除 reset_scores 指令，新增分頁功能
-已修復資料庫鎖定和主鍵重複問題 - 完整版
+已修復資料庫鎖定和主鍵重複問題 - 使用 asyncio.Lock 版本
 """
 
 import os
@@ -18,7 +18,6 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Literal
 import sqlite3
 import time
-import threading
 
 # ========== 設定 ==========
 BOT_NAME = "小雲機械人"
@@ -79,11 +78,11 @@ tree = bot.tree
 
 # ========== 資料庫設定 ==========
 DB_NAME = "bot_data.db"
-db_lock = threading.Lock()
+db_lock = asyncio.Lock()  # 使用 asyncio.Lock 替代 threading.Lock
 
-def init_db():
+async def init_db():
     """初始化資料庫"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         
@@ -203,9 +202,9 @@ def init_db():
         conn.close()
         print("✅ 資料庫初始化完成")
 
-def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0):
+async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0):
     """記錄查詢日誌"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute(
@@ -217,9 +216,9 @@ def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0
 
 # ========== 通用函數 ==========
 
-def get_user_score(user_id, guild_id=0):
+async def get_user_score(user_id, guild_id=0):
     """取得用戶積分"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("SELECT current_score, total_score FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
@@ -230,10 +229,10 @@ def get_user_score(user_id, guild_id=0):
             return result[0], result[1]
         return 0, 0
 
-def update_user_score(user_id, username, amount, reason="", guild_id=0):
+async def update_user_score(user_id, username, amount, reason="", guild_id=0):
     """更新用戶積分（修復版本）"""
     try:
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -246,7 +245,7 @@ def update_user_score(user_id, username, amount, reason="", guild_id=0):
                 current_score = max(amount, 0)
                 total_score = max(amount, 0)
                 cursor.execute(
-                    "INSERT OR REPLACE INTO users (user_id, username, current_score, total_score, guild_id) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT OR IGNORE INTO users (user_id, username, current_score, total_score, guild_id) VALUES (?, ?, ?, ?, ?)",
                     (user_id, username, current_score, total_score, guild_id)
                 )
             else:
@@ -279,7 +278,7 @@ def update_user_score(user_id, username, amount, reason="", guild_id=0):
         print(f"⚠️ 資料庫完整性錯誤: {e}")
         # 如果發生主鍵衝突，改為更新
         if "UNIQUE constraint failed" in str(e):
-            with db_lock:
+            async with db_lock:
                 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                 cursor = conn.cursor()
                 if amount > 0:
@@ -297,9 +296,9 @@ def update_user_score(user_id, username, amount, reason="", guild_id=0):
     except Exception as e:
         print(f"更新用戶積分錯誤: {e}")
 
-def get_user_profile(user_id, guild_id=0):
+async def get_user_profile(user_id, guild_id=0):
     """獲取用戶完整資料"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
@@ -330,17 +329,18 @@ def get_user_profile(user_id, guild_id=0):
         
         return None
 
-def update_user_profession(user_id, profession, guild_id=0):
+async def update_user_profession(user_id, profession, guild_id=0):
     """更新用戶職業統計"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         
-        cursor.execute("SELECT profession_counts FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
+        cursor.execute("SELECT profession_counts, username FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
         result = cursor.fetchone()
         
         if result:
             profession_str = result[0]
+            username = result[1]
             profession_counts = json.loads(profession_str) if profession_str else {}
             
             if profession in profession_counts:
@@ -350,12 +350,8 @@ def update_user_profession(user_id, profession, guild_id=0):
             
             bonus_score = PROFESSION_BONUS.get(profession, 0)
             if bonus_score > 0:
-                cursor.execute("SELECT username FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-                user_result = cursor.fetchone()
-                username = user_result[0] if user_result else "未知用戶"
-                
-                cursor.execute("UPDATE users SET current_score = current_score + ?, total_score = total_score + ? WHERE user_id = ? AND guild_id = ?", 
-                             (bonus_score, bonus_score, user_id, guild_id))
+                # 使用異步調用更新積分
+                await update_user_score(user_id, username, bonus_score, f"職業加成: {profession}", guild_id)
             
             cursor.execute("UPDATE users SET profession_counts = ? WHERE user_id = ? AND guild_id = ?", 
                           (json.dumps(profession_counts), user_id, guild_id))
@@ -364,9 +360,9 @@ def update_user_profession(user_id, profession, guild_id=0):
         
         conn.close()
 
-def update_user_activity(user_id, event_name, attended=True, guild_id=0):
+async def update_user_activity(user_id, event_name, attended=True, guild_id=0):
     """更新用戶活動統計"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         
@@ -397,9 +393,9 @@ def update_user_activity(user_id, event_name, attended=True, guild_id=0):
         
         conn.close()
 
-def update_user_rating(user_id, rating_type, guild_id=0):
+async def update_user_rating(user_id, rating_type, guild_id=0):
     """更新用戶評核統計"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         
@@ -450,9 +446,9 @@ def get_current_half_month():
     else:
         return f"{year_month}-下半"
 
-def get_total_events_in_period(guild_id=0, period: str = "current"):
+async def get_total_events_in_period(guild_id=0, period: str = "current"):
     """獲取指定期間內的總活動數"""
-    with db_lock:
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
         
@@ -491,68 +487,67 @@ def get_total_events_in_period(guild_id=0, period: str = "current"):
             conn.close()
             return total_events
 
-def get_all_attendance_data(guild_id=0, period: str = "current"):
+async def get_all_attendance_data(guild_id=0, period: str = "current"):
     """獲取所有用戶的出席數據"""
-    with db_lock:
+    # 獲取總活動數
+    total_events = await get_total_events_in_period(guild_id, period)
+    
+    if total_events == 0:
+        return []
+    
+    async with db_lock:
         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
         cursor = conn.cursor()
-        
-        # 獲取總活動數
-        total_events = get_total_events_in_period(guild_id, period)
-        
-        if total_events == 0:
-            conn.close()
-            return []
         
         # 獲取所有用戶
         cursor.execute("SELECT user_id, username, activity_stats FROM users WHERE guild_id = ?", (guild_id,))
         results = cursor.fetchall()
         conn.close()
-        
-        rankings = []
-        current_period = get_current_half_month()
-        
-        for user_id, username, activity_str in results:
-            if not activity_str:
-                # 如果沒有活動統計數據，則出席率為0%
-                attended_count = 0
-            else:
-                activity_stats = json.loads(activity_str)
-                
-                if period == "current":
-                    # 只計算當前半月期
-                    if current_period in activity_stats:
-                        data = activity_stats[current_period]
-                        attended_count = data.get("attended", 0)
-                    else:
-                        attended_count = 0
+    
+    rankings = []
+    current_period = get_current_half_month()
+    
+    for user_id, username, activity_str in results:
+        if not activity_str:
+            # 如果沒有活動統計數據，則出席率為0%
+            attended_count = 0
+        else:
+            activity_stats = json.loads(activity_str)
+            
+            if period == "current":
+                # 只計算當前半月期
+                if current_period in activity_stats:
+                    data = activity_stats[current_period]
+                    attended_count = data.get("attended", 0)
                 else:
-                    # 計算所有半月期的總和
                     attended_count = 0
-                    for period_key, data in activity_stats.items():
-                        attended_count += data.get("attended", 0)
-            
-            # 計算出席率：已參加次數 ÷ 總活動數
-            attendance_rate = (attended_count / total_events) * 100 if total_events > 0 else 0
-            
-            rankings.append({
-                'user_id': user_id,
-                'username': username,
-                'attendance_rate': attendance_rate,
-                'attended': attended_count,
-                'total': total_events,
-                'period': current_period if period == "current" else "全部"
-            })
+            else:
+                # 計算所有半月期的總和
+                attended_count = 0
+                for period_key, data in activity_stats.items():
+                    attended_count += data.get("attended", 0)
         
-        # 按出席率降序排序，如果出席率相同則按用戶名排序
-        rankings.sort(key=lambda x: (-x['attendance_rate'], x['username']))
+        # 計算出席率：已參加次數 ÷ 總活動數
+        attendance_rate = (attended_count / total_events) * 100 if total_events > 0 else 0
         
-        return rankings
+        rankings.append({
+            'user_id': user_id,
+            'username': username,
+            'attendance_rate': attendance_rate,
+            'attended': attended_count,
+            'total': total_events,
+            'period': current_period if period == "current" else "全部"
+        })
+    
+    # 按出席率降序排序，如果出席率相同則按用戶名排序
+    rankings.sort(key=lambda x: (-x['attendance_rate'], x['username']))
+    
+    return rankings
 
 async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
     """結束抽獎"""
     try:
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -634,7 +629,7 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
 async def end_evaluation(event_id, channel, event_name, guild_id=0):
     """結束評核活動"""
     try:
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -816,12 +811,12 @@ async def profile_slash(interaction: discord.Interaction):
         username = interaction.user.name
         guild_id = get_guild_id(interaction)
         
-        log_query("profile", user_id, {"action": "view_profile"}, guild_id)
+        await log_query("profile", user_id, {"action": "view_profile"}, guild_id)
         
-        profile = get_user_profile(user_id, guild_id)
+        profile = await get_user_profile(user_id, guild_id)
         
         if not profile:
-            with db_lock:
+            async with db_lock:
                 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                 cursor = conn.cursor()
                 cursor.execute(
@@ -965,7 +960,7 @@ async def giveaway_slash(
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("giveaway", interaction.user.id, {"prize": prize, "duration": duration, "winners": winners}, guild_id)
+        await log_query("giveaway", interaction.user.id, {"prize": prize, "duration": duration, "winners": winners}, guild_id)
         
         duration_lower = duration.lower().strip()
         seconds = 3600
@@ -1029,7 +1024,7 @@ async def giveaway_slash(
         await message.add_reaction("🎫")
         await message.add_reaction("⏹️")
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             cursor.execute('''
@@ -1064,7 +1059,7 @@ async def giveaway_slash(
                         time_display = f"{days}天{hours}小時"
                     
                     try:
-                        with db_lock:
+                        async with db_lock:
                             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                             cursor = conn.cursor()
                             cursor.execute("SELECT participants FROM giveaways WHERE message_id = ? AND guild_id = ?", (message.id, guild_id))
@@ -1115,9 +1110,9 @@ async def score_draw_slash(interaction: discord.Interaction):
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("score_draw", interaction.user.id, {"action": "open_draw"}, guild_id)
+        await log_query("score_draw", interaction.user.id, {"action": "open_draw"}, guild_id)
         
-        current_score, _ = get_user_score(interaction.user.id, guild_id)
+        current_score, _ = await get_user_score(interaction.user.id, guild_id)
         
         embed = discord.Embed(
             title="🎲 積分抽獎系統",
@@ -1174,7 +1169,7 @@ async def score_draw_slash(interaction: discord.Interaction):
                     await interaction.response.send_message("❌ 這不是你的抽獎！", ephemeral=True)
                     return
                 
-                current_score, _ = get_user_score(interaction.user.id, self.guild_id)
+                current_score, _ = await get_user_score(interaction.user.id, self.guild_id)
                 if current_score < score_cost:
                     await interaction.response.send_message(
                         f"❌ 積分不足！需要 {score_cost} 分，你目前有 {current_score} 分",
@@ -1193,7 +1188,7 @@ async def score_draw_slash(interaction: discord.Interaction):
                 box_weights_list = list(box_weights.values())
                 selected_box = random.choices(box_types, weights=box_weights_list, k=1)[0]
                 
-                with db_lock:
+                async with db_lock:
                     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                     cursor = conn.cursor()
                     cursor.execute(
@@ -1209,7 +1204,7 @@ async def score_draw_slash(interaction: discord.Interaction):
                     
                     prize_id, prize_name = result
                     
-                    update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎 ({selected_box})", self.guild_id)
+                    await update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎 ({selected_box})", self.guild_id)
                     cursor.execute("UPDATE prize_pool SET remaining = remaining - 1 WHERE id = ?", (prize_id,))
                     
                     cursor.execute('''
@@ -1220,7 +1215,7 @@ async def score_draw_slash(interaction: discord.Interaction):
                     conn.commit()
                     conn.close()
                 
-                new_current_score, _ = get_user_score(interaction.user.id, self.guild_id)
+                new_current_score, _ = await get_user_score(interaction.user.id, self.guild_id)
                 
                 result_embed = discord.Embed(
                     title="🎉 抽獎結果",
@@ -1269,7 +1264,7 @@ async def score_transfer_slash(
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("score_transfer", interaction.user.id, {"target": user.id, "amount": amount, "reason": reason}, guild_id)
+        await log_query("score_transfer", interaction.user.id, {"target": user.id, "amount": amount, "reason": reason}, guild_id)
         
         if amount <= 0:
             await interaction.followup.send("❌ 積分必須大於 0")
@@ -1279,18 +1274,18 @@ async def score_transfer_slash(
             await interaction.followup.send("❌ 不能轉移積分給自己")
             return
         
-        sender_score, _ = get_user_score(interaction.user.id, guild_id)
+        sender_score, _ = await get_user_score(interaction.user.id, guild_id)
         
         if sender_score < amount:
             await interaction.followup.send(f"❌ 你的積分不足！需要 {amount} 分，你目前有 {sender_score} 分")
             return
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
-            update_user_score(interaction.user.id, interaction.user.name, -amount, f"轉移給 {user.name}", guild_id)
-            update_user_score(user.id, user.name, amount, f"來自 {interaction.user.name} 的轉移", guild_id)
+            await update_user_score(interaction.user.id, interaction.user.name, -amount, f"轉移給 {user.name}", guild_id)
+            await update_user_score(user.id, user.name, amount, f"來自 {interaction.user.name} 的轉移", guild_id)
             
             cursor.execute('''
                 INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id)
@@ -1300,7 +1295,7 @@ async def score_transfer_slash(
             conn.commit()
             conn.close()
         
-        new_sender_score, _ = get_user_score(interaction.user.id, guild_id)
+        new_sender_score, _ = await get_user_score(interaction.user.id, guild_id)
         
         embed = discord.Embed(
             title="💸 積分轉移成功",
@@ -1329,9 +1324,9 @@ async def prizelist_slash(interaction: discord.Interaction):
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("prizelist", interaction.user.id, {"action": "view_pool"}, guild_id)
+        await log_query("prizelist", interaction.user.id, {"action": "view_pool"}, guild_id)
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -1449,7 +1444,7 @@ async def random_team_slash(
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("random_team", interaction.user.id, {"team_size": team_size, "team_count": team_count}, guild_id)
+        await log_query("random_team", interaction.user.id, {"team_size": team_size, "team_count": team_count}, guild_id)
         
         if not interaction.guild:
             await interaction.followup.send("❌ 此指令只能在伺服器中使用")
@@ -1595,9 +1590,9 @@ async def score_ranking_slash(interaction: discord.Interaction):
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("score_ranking", interaction.user.id, {"action": "view_ranking"}, guild_id)
+        await log_query("score_ranking", interaction.user.id, {"action": "view_ranking"}, guild_id)
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -1644,7 +1639,7 @@ async def score_ranking_slash(interaction: discord.Interaction):
         embed.add_field(name="🏅 排名", value=ranking_text, inline=False)
         
         # 添加當前用戶排名
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             cursor.execute("""
@@ -1690,14 +1685,14 @@ async def attendance_ranking_slash(
     
     try:
         guild_id = get_guild_id(interaction)
-        log_query("attendance_ranking", interaction.user.id, {"period": period, "page": page}, guild_id)
+        await log_query("attendance_ranking", interaction.user.id, {"period": period, "page": page}, guild_id)
         
         if page < 1:
             await interaction.followup.send("❌ 頁數必須大於 0")
             return
         
         # 獲取所有出席數據
-        rankings = get_all_attendance_data(guild_id, period)
+        rankings = await get_all_attendance_data(guild_id, period)
         
         if not rankings:
             embed = discord.Embed(
@@ -1827,7 +1822,7 @@ async def attendance_ranking_slash(
                 await interaction.response.defer()
                 
                 # 獲取新頁面的數據
-                rankings = get_all_attendance_data(self.guild_id, self.period)
+                rankings = await get_all_attendance_data(self.guild_id, self.period)
                 total_users = len(rankings)
                 total_pages = (total_users + users_per_page - 1) // users_per_page
                 
@@ -1987,14 +1982,14 @@ async def add_prize_slash(
             return
         
         guild_id = get_guild_id(interaction)
-        log_query("add_prize", interaction.user.id, {"name": name, "box_level": box_level, "quantity": quantity}, guild_id)
+        await log_query("add_prize", interaction.user.id, {"name": name, "box_level": box_level, "quantity": quantity}, guild_id)
         
         valid_levels = ["綠箱", "藍箱", "紫箱", "金箱"]
         if box_level not in valid_levels:
             await interaction.followup.send(f"❌ 無效的寶箱等級！請選擇：{', '.join(valid_levels)}")
             return
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -2112,15 +2107,15 @@ async def add_score_slash(
             return
         
         guild_id = get_guild_id(interaction)
-        log_query("add_score", interaction.user.id, {"target": user.id, "amount": amount, "reason": reason}, guild_id)
+        await log_query("add_score", interaction.user.id, {"target": user.id, "amount": amount, "reason": reason}, guild_id)
         
         if amount == 0:
             await interaction.followup.send("❌ 積分變化不能為 0")
             return
         
-        old_score, old_total = get_user_score(user.id, guild_id)
-        update_user_score(user.id, user.name, amount, f"管理員調整: {reason}", guild_id)
-        new_score, new_total = get_user_score(user.id, guild_id)
+        old_score, old_total = await get_user_score(user.id, guild_id)
+        await update_user_score(user.id, user.name, amount, f"管理員調整: {reason}", guild_id)
+        new_score, new_total = await get_user_score(user.id, guild_id)
         
         action = "增加" if amount > 0 else "減少"
         embed = discord.Embed(
@@ -2167,7 +2162,7 @@ async def create_event_slash(
             return
         
         guild_id = get_guild_id(interaction)
-        log_query("create_event", interaction.user.id, {"event_name": event_name, "signup_time": signup_time, "prize": prize}, guild_id)
+        await log_query("create_event", interaction.user.id, {"event_name": event_name, "signup_time": signup_time, "prize": prize}, guild_id)
         
         signup_embed = discord.Embed(
             title=f"📋 評核活動：{event_name}",
@@ -2204,7 +2199,7 @@ async def create_event_slash(
         
         signup_end_time = datetime.now() + timedelta(minutes=signup_time)
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             cursor.execute('''
@@ -2224,7 +2219,7 @@ async def create_event_slash(
                 remaining_minutes -= 1
                 
                 try:
-                    with db_lock:
+                    async with db_lock:
                         conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                         cursor = conn.cursor()
                         cursor.execute("SELECT participants FROM evaluation_events WHERE signup_message_id = ? AND guild_id = ?", (signup_message.id, guild_id))
@@ -2261,7 +2256,7 @@ async def create_event_slash(
                     print(f"更新簽到訊息錯誤: {e}")
             
             try:
-                with db_lock:
+                async with db_lock:
                     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                     cursor = conn.cursor()
                     cursor.execute("SELECT participants FROM evaluation_events WHERE signup_message_id = ? AND guild_id = ?", (signup_message.id, guild_id))
@@ -2272,9 +2267,9 @@ async def create_event_slash(
                         participants = json.loads(result[0])
                     
                     for user_id in participants:
-                        update_user_score(user_id, f"用戶{user_id}", SIGNUP_SCORE, f"活動簽到: {event_name}", guild_id)
-                        update_user_activity(user_id, event_name, attended=True, guild_id=guild_id)
-                        update_user_rating(user_id, "普通", guild_id)
+                        await update_user_score(user_id, f"用戶{user_id}", SIGNUP_SCORE, f"活動簽到: {event_name}", guild_id)
+                        await update_user_activity(user_id, event_name, attended=True, guild_id=guild_id)
+                        await update_user_rating(user_id, "普通", guild_id)
                     
                     cursor.execute("UPDATE evaluation_events SET default_rated = ?, is_active = 1 WHERE signup_message_id = ? AND guild_id = ?", 
                                  (json.dumps(participants), signup_message.id, guild_id))
@@ -2334,7 +2329,7 @@ async def create_event_slash(
                 for emoji in ["⭐", "👍", "👌", "❌", RATING_END_EMOJI]:
                     await rating_msg.add_reaction(emoji)
                 
-                with db_lock:
+                async with db_lock:
                     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                     cursor = conn.cursor()
                     cursor.execute("UPDATE evaluation_events SET rating_message_id = ? WHERE signup_message_id = ? AND guild_id = ?", 
@@ -2379,9 +2374,9 @@ async def activity_stats_slash(interaction: discord.Interaction):
             return
         
         guild_id = get_guild_id(interaction)
-        log_query("activity_stats", interaction.user.id, {"action": "view_stats"}, guild_id)
+        await log_query("activity_stats", interaction.user.id, {"action": "view_stats"}, guild_id)
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -2472,7 +2467,7 @@ async def on_ready():
     print(f"📊 伺服器數量: {len(bot.guilds)}")
     print(f"{'='*60}")
     
-    init_db()
+    await init_db()
     print("✅ 資料庫初始化完成")
     
     try:
@@ -2517,7 +2512,7 @@ async def on_raw_reaction_add(payload):
         
         guild_id = payload.guild_id if hasattr(payload, 'guild_id') else 0
         
-        with db_lock:
+        async with db_lock:
             conn = sqlite3.connect(DB_NAME, check_same_thread=False)
             cursor = conn.cursor()
             
@@ -2673,7 +2668,7 @@ async def on_raw_reaction_add(payload):
                             
                             print(f"選擇了用戶 {display_name} ({selected_user_id}) 進行 {rating_type} 評核")
                             
-                            with db_lock:
+                            async with db_lock:
                                 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
                                 cursor = conn.cursor()
                                 
@@ -2704,14 +2699,14 @@ async def on_raw_reaction_add(payload):
                             
                             if old_rating and old_rating != self.rating_type:
                                 old_score = RATING_SCORES.get(old_rating, 0)
-                                update_user_score(selected_user_id, display_name, -old_score, f"評級變更: {old_rating} → {self.rating_type}", self.guild_id)
+                                await update_user_score(selected_user_id, display_name, -old_score, f"評級變更: {old_rating} → {self.rating_type}", self.guild_id)
                                 print(f"移除舊評級積分: {old_rating} (-{old_score}分)")
                             
                             new_score = RATING_SCORES.get(self.rating_type, 0)
-                            update_user_rating(selected_user_id, self.rating_type, self.guild_id)
+                            await update_user_rating(selected_user_id, self.rating_type, self.guild_id)
                             
                             if new_score != 0:
-                                update_user_score(selected_user_id, display_name, new_score, f"活動評核: {self.rating_type}", self.guild_id)
+                                await update_user_score(selected_user_id, display_name, new_score, f"活動評核: {self.rating_type}", self.guild_id)
                                 print(f"添加新評級積分: {self.rating_type} (+{new_score}分)")
                             
                             score_change = RATING_SCORES.get(self.rating_type, 0)
@@ -2910,7 +2905,7 @@ async def on_raw_reaction_add(payload):
                                          (json.dumps(professions), event_id, guild_id))
                             conn.commit()
                             
-                            update_user_profession(user_id, profession_name, guild_id)
+                            await update_user_profession(user_id, profession_name, guild_id)
                             
                             try:
                                 bonus = PROFESSION_BONUS.get(profession_name, 0)
@@ -2943,7 +2938,7 @@ async def on_raw_reaction_add(payload):
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - 13指令完整版本（修復資料庫問題）")
+    print(f"🚀 啟動 {BOT_NAME} - 13指令完整版本（使用 asyncio.Lock 修復）")
     print(f"💡 主要指令: 使用 / 前綴")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
     print(f"📁 資料庫位置: {DB_NAME}")
