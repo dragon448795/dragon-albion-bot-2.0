@@ -1054,7 +1054,6 @@ async def on_raw_reaction_add(payload):
 
 # ========== 斜槓指令 ==========
 
-# 同步指令
 @bot.tree.command(name="sync", description="同步斜槓指令（擁有者）")
 async def sync_slash(interaction: discord.Interaction):
     """同步指令"""
@@ -1087,7 +1086,6 @@ async def sync_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
-# 幫助指令
 @bot.tree.command(name="help", description="顯示幫助訊息 / 幫助")
 async def help_slash(interaction: discord.Interaction):
     """顯示幫助"""
@@ -1140,7 +1138,6 @@ async def help_slash(interaction: discord.Interaction):
     embed.set_footer(text="使用 / 開頭輸入指令")
     await interaction.response.send_message(embed=embed)
 
-# 個人資料指令
 @bot.tree.command(name="profile", description="查看我的數據 / 我的數據")
 async def profile_slash(interaction: discord.Interaction):
     """查看用戶資料"""
@@ -1280,7 +1277,6 @@ async def profile_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-# 抽獎指令
 @bot.tree.command(name="giveaway", description="創建抽獎活動 / 抽獎")
 @app_commands.describe(
     prize="獎品內容",
@@ -1439,7 +1435,6 @@ async def giveaway_slash(
         await interaction.followup.send(embed=error_embed)
         print(f"Giveaway error: {e}")
 
-# 積分抽獎指令
 @bot.tree.command(name="score_draw", description="使用積分抽獎 / 積分抽獎")
 async def score_draw_slash(interaction: discord.Interaction):
     """積分抽獎"""
@@ -1579,7 +1574,6 @@ async def score_draw_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-# 積分轉移指令
 @bot.tree.command(name="score_transfer", description="轉移積分給其他用戶 / 積分過戶")
 @app_commands.describe(
     user="目標用戶",
@@ -1646,7 +1640,6 @@ async def score_transfer_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 彩池列表指令
 @bot.tree.command(name="prizelist", description="查看彩池列表 / 彩池")
 async def prizelist_slash(interaction: discord.Interaction):
     """查看彩池"""
@@ -1755,7 +1748,6 @@ async def prizelist_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-# 隨機分組指令
 @bot.tree.command(name="random_team", description="隨機分組 / 隨機分組")
 @app_commands.describe(
     team_size="每組人數",
@@ -1909,7 +1901,6 @@ async def random_team_slash(
 
 # ========== 管理員指令 ==========
 
-# 添加獎品指令
 @bot.tree.command(name="add_prize", description="添加獎品到彩池 / 調整彩池")
 @app_commands.describe(
     name="獎品名稱",
@@ -2031,7 +2022,6 @@ async def add_prize_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 調整積分指令
 @bot.tree.command(name="add_score", description="調整用戶積分 / 加減積分")
 @app_commands.describe(
     user="目標用戶",
@@ -2084,7 +2074,6 @@ async def add_score_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 創建評核活動指令
 @bot.tree.command(name="create_event", description="創建評核活動 / 創建評核活動")
 @app_commands.describe(
     event_name="活動名稱",
@@ -2315,7 +2304,6 @@ async def create_event_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 所有用戶資料指令
 @bot.tree.command(name="all_profiles", description="查看所有用戶資料 / 所有用戶數據")
 @app_commands.describe(
     sort_by="排序方式",
@@ -2607,7 +2595,6 @@ async def all_profiles_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 出席率統計指令
 @bot.tree.command(name="attendance_stats", description="查看用戶出席率統計 / 出席率")
 @app_commands.describe(
     period="統計期間",
