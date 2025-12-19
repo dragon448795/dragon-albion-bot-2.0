@@ -2348,10 +2348,22 @@ async def on_ready():
     init_db()
     print("✅ 資料庫初始化完成")
     
-    try:
-        print("\n🔄 正在同步指令...")
-        global_synced = await tree.sync()
-        print(f"✅ 已同步 {len(global_synced)} 個指令")
+ try:
+    print("\n🔄 正在強制同步指令...")
+    # 首先清除所有現有指令（可選，但最有效）
+    bot.tree.clear_commands(guild=None)
+    
+    # 然後重新同步全局指令
+    await bot.tree.sync()
+    
+    # 再同步一次確保生效
+    global_synced = await bot.tree.sync()
+    print(f"✅ 已同步 {len(global_synced)} 個指令")
+    
+    # 如果有特定伺服器需要同步，也可以同步到伺服器
+    for guild in bot.guilds:
+        await bot.tree.sync(guild=guild)
+        print(f"✅ 已同步指令到伺服器: {guild.name}")
         
         print("\n📋 可用指令:")
         for cmd in global_synced:
@@ -2869,3 +2881,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
