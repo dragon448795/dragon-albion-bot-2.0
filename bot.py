@@ -2341,5 +2341,4 @@ def main():
         print(f"❌ 啟動失敗: {e}")
 
 if __name__ == "__main__":
-
     main()
