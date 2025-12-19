@@ -620,7 +620,9 @@ async def help_slash(interaction: discord.Interaction):
         value=(
             "`/add_prize [名稱] [類型] [數量]` - 調整彩池\n"
             "`/add_score [用戶] [積分] [原因]` - 加減積分\n"
-            "`/create_event [活動名稱]` - 創建評核活動"
+            "`/create_event [活動名稱]` - 創建評核活動\n"
+            "`/all_profiles [排序] [數量]` - 查看所有用戶資料\n"
+            "`/attendance_stats [期間]` - 查看出席率統計"
         ),
         inline=False
     )
@@ -1803,6 +1805,531 @@ async def create_event_slash(
     except Exception as e:
         error_embed = discord.Embed(
             title="❌ 創建活動失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
+
+# ========== 新增的管理員指令：查看所有用戶資料 ==========
+
+@tree.command(name="all_profiles", description="查看所有用戶資料 / 所有用戶數據")
+@app_commands.describe(
+    sort_by="排序方式",
+    limit="顯示數量"
+)
+@app_commands.choices(sort_by=[
+    app_commands.Choice(name="現有積分(高到低)", value="current_score"),
+    app_commands.Choice(name="總獲得積分(高到低)", value="total_score"),
+    app_commands.Choice(name="加入日期(早到晚)", value="join_date"),
+    app_commands.Choice(name="最後活躍(近到遠)", value="last_active"),
+    app_commands.Choice(name="出席率(高到低)", value="attendance_rate"),
+    app_commands.Choice(name="總活動次數(多到少)", value="total_events"),
+    app_commands.Choice(name="實際出席次數(多到少)", value="attended_events"),
+])
+async def all_profiles_slash(
+    interaction: discord.Interaction,
+    sort_by: Optional[str] = "current_score",
+    limit: Optional[int] = 20
+):
+    """查看所有用戶資料"""
+    await interaction.response.defer()
+    
+    try:
+        # 檢查管理員權限
+        if not interaction.user.guild_permissions.administrator:
+            embed = discord.Embed(
+                title="❌ 權限不足",
+                description="只有管理員可以查看所有用戶資料",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        if limit > 50:
+            limit = 50
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        # 獲取所有用戶資料
+        cursor.execute("""
+            SELECT user_id, username, current_score, total_score, join_date, 
+                   last_active, activity_stats, rating_stats, profession_counts
+            FROM users
+        """)
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        if not results:
+            embed = discord.Embed(
+                title="📊 所有用戶資料",
+                description="資料庫中沒有用戶資料",
+                color=0xFFFF00
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        # 處理用戶數據，計算出席率
+        processed_users = []
+        current_period = get_current_half_month()
+        
+        for row in results:
+            user_id, username, current_score, total_score, join_date, last_active, activity_str, rating_str, profession_str = row
+            
+            # 計算出席率
+            activity_stats = json.loads(activity_str) if activity_str else {}
+            
+            # 方法1：計算當前半月期的出席率
+            current_period_data = activity_stats.get(current_period, {})
+            total_events = current_period_data.get("total", 0)
+            attended_events = current_period_data.get("attended", 0)
+            current_attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
+            
+            # 方法2：計算總出席率
+            total_all_events = 0
+            total_all_attended = 0
+            for period, data in activity_stats.items():
+                total_all_events += data.get("total", 0)
+                total_all_attended += data.get("attended", 0)
+            overall_attendance_rate = (total_all_attended / total_all_events * 100) if total_all_events > 0 else 0.0
+            
+            # 評核統計
+            rating_stats = json.loads(rating_str) if rating_str else {}
+            total_ratings = sum(rating_stats.values()) if rating_stats else 0
+            excellent_ratings = rating_stats.get("優秀", 0)
+            good_ratings = rating_stats.get("良好", 0)
+            poor_ratings = rating_stats.get("不合格", 0)
+            
+            # 職業統計
+            profession_counts = json.loads(profession_str) if profession_str else {}
+            total_professions = sum(profession_counts.values()) if profession_counts else 0
+            
+            processed_users.append({
+                "user_id": user_id,
+                "username": username,
+                "current_score": current_score,
+                "total_score": total_score,
+                "join_date": join_date,
+                "last_active": last_active,
+                "current_attendance_rate": current_attendance_rate,
+                "overall_attendance_rate": overall_attendance_rate,
+                "total_events": total_all_events,
+                "attended_events": total_all_attended,
+                "total_ratings": total_ratings,
+                "excellent_ratings": excellent_ratings,
+                "good_ratings": good_ratings,
+                "poor_ratings": poor_ratings,
+                "total_professions": total_professions,
+                "activity_stats": activity_stats
+            })
+        
+        # 排序
+        sort_functions = {
+            "current_score": lambda x: x["current_score"],
+            "total_score": lambda x: x["total_score"],
+            "join_date": lambda x: x["join_date"],
+            "last_active": lambda x: x["last_active"],
+            "attendance_rate": lambda x: x["overall_attendance_rate"],  # 新增：按總出席率排序
+            "total_events": lambda x: x["total_events"],  # 新增：按總活動次數排序
+            "attended_events": lambda x: x["attended_events"],  # 新增：按實際出席次數排序
+        }
+        
+        reverse_order = {
+            "current_score": True,
+            "total_score": True,
+            "join_date": False,
+            "last_active": True,
+            "attendance_rate": True,  # 出席率高到低
+            "total_events": True,     # 活動次數多到少
+            "attended_events": True,  # 出席次數多到少
+        }
+        
+        sort_func = sort_functions.get(sort_by, lambda x: x["current_score"])
+        reverse = reverse_order.get(sort_by, True)
+        
+        sorted_users = sorted(processed_users, key=sort_func, reverse=reverse)
+        
+        # 限制顯示數量
+        display_users = sorted_users[:limit]
+        
+        # 計算統計數據
+        total_users = len(display_users)
+        total_current_score = sum(u["current_score"] for u in display_users)
+        total_total_score = sum(u["total_score"] for u in display_users)
+        avg_current_score = total_current_score / total_users if total_users > 0 else 0
+        avg_total_score = total_total_score / total_users if total_users > 0 else 0
+        
+        # 計算平均出席率
+        avg_attendance_rate = sum(u["overall_attendance_rate"] for u in display_users) / total_users if total_users > 0 else 0
+        
+        # 創建分頁視圖
+        profiles_per_page = 8  # 減少每頁數量，因為資訊變多了
+        pages = []
+        
+        for i in range(0, len(display_users), profiles_per_page):
+            embed = discord.Embed(
+                title="📊 所有用戶資料總覽",
+                description=f"顯示 {min(i + profiles_per_page, len(display_users))}/{len(display_users)} 位用戶",
+                color=0x43B581
+            )
+            
+            # 添加統計信息（根據排序方式顯示不同統計）
+            if sort_by == "attendance_rate":
+                embed.add_field(
+                    name="📈 出席率統計",
+                    value=f"**總用戶數：** {total_users} 人\n"
+                          f"**平均出席率：** {avg_attendance_rate:.1f}%\n"
+                          f"**最高出席率：** {max(u['overall_attendance_rate'] for u in display_users):.1f}%\n"
+                          f"**最低出席率：** {min(u['overall_attendance_rate'] for u in display_users):.1f}%",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name="📈 統計摘要",
+                    value=f"**總用戶數：** {total_users} 人\n"
+                          f"**總現有積分：** {total_current_score} 分\n"
+                          f"**總歷史積分：** {total_total_score} 分\n"
+                          f"**平均現有積分：** {avg_current_score:.1f} 分\n"
+                          f"**平均出席率：** {avg_attendance_rate:.1f}%",
+                    inline=False
+                )
+            
+            # 添加排序信息
+            sort_names = {
+                "current_score": "現有積分（由高到低）",
+                "total_score": "總獲得積分（由高到低）",
+                "join_date": "加入日期（由早到晚）",
+                "last_active": "最後活躍（由近到遠）",
+                "attendance_rate": "總出席率（由高到低）",
+                "total_events": "總活動次數（由多到少）",
+                "attended_events": "實際出席次數（由多到少）",
+            }
+            
+            embed.add_field(
+                name="📊 排序方式",
+                value=sort_names.get(sort_by, "現有積分"),
+                inline=False
+            )
+            
+            # 添加用戶列表
+            user_list = ""
+            for user in display_users[i:i + profiles_per_page]:
+                user_id = user["user_id"]
+                username = user["username"]
+                
+                # 獲取 Discord 用戶（如果可用）
+                discord_user = interaction.guild.get_member(user_id)
+                display_name = discord_user.display_name if discord_user else username
+                
+                user_list += f"**{display_name}**\n"
+                
+                if sort_by == "attendance_rate":
+                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
+                    user_list += f"  🎮 活動：{user['attended_events']}/{user['total_events']}次\n"
+                    user_list += f"  ⭐ 優秀評級：{user['excellent_ratings']}次\n"
+                elif sort_by == "total_events":
+                    user_list += f"  📋 總活動：{user['total_events']}次\n"
+                    user_list += f"  ✅ 出席：{user['attended_events']}次\n"
+                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
+                elif sort_by == "attended_events":
+                    user_list += f"  ✅ 出席次數：{user['attended_events']}次\n"
+                    user_list += f"  📋 總活動：{user['total_events']}次\n"
+                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
+                else:
+                    user_list += f"  🔹 現有積分：{user['current_score']}分\n"
+                    user_list += f"  📊 總積分：{user['total_score']}分\n"
+                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
+                
+                # 添加分隔線
+                user_list += "  ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            
+            embed.add_field(
+                name="👥 用戶列表",
+                value=user_list if user_list else "無用戶資料",
+                inline=False
+            )
+            
+            # 添加當前半月期資訊
+            embed.add_field(
+                name="📅 當前半月期",
+                value=f"**{current_period}**\n"
+                      f"（每月1-15日為上半月，16-月底為下半月）",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"頁面 {i//profiles_per_page + 1}/{(len(display_users)-1)//profiles_per_page + 1}")
+            pages.append(embed)
+        
+        if len(pages) == 1:
+            await interaction.followup.send(embed=pages[0])
+        else:
+            # 創建分頁視圖
+            current_page = 0
+            
+            class ProfilesPaginator(discord.ui.View):
+                def __init__(self, pages, timeout=180):
+                    super().__init__(timeout=timeout)
+                    self.pages = pages
+                    self.current_page = 0
+                    self.update_buttons()
+                
+                def update_buttons(self):
+                    self.children[0].disabled = self.current_page == 0
+                    self.children[1].disabled = self.current_page == len(self.pages) - 1
+                
+                @discord.ui.button(label="上一頁", style=discord.ButtonStyle.secondary, emoji="⬅️")
+                async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if self.current_page > 0:
+                        self.current_page -= 1
+                        self.update_buttons()
+                        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+                
+                @discord.ui.button(label="下一頁", style=discord.ButtonStyle.secondary, emoji="➡️")
+                async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if self.current_page < len(self.pages) - 1:
+                        self.current_page += 1
+                        self.update_buttons()
+                        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+            
+            view = ProfilesPaginator(pages)
+            await interaction.followup.send(embed=pages[0], view=view)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 讀取用戶資料失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
+
+# ========== 新增的管理員指令：出席率統計 ==========
+
+@tree.command(name="attendance_stats", description="查看用戶出席率統計 / 出席率")
+@app_commands.describe(
+    period="統計期間",
+    min_events="最低活動次數（過濾活躍用戶）"
+)
+@app_commands.choices(period=[
+    app_commands.Choice(name="當前半月期", value="current"),
+    app_commands.Choice(name="所有期間", value="all"),
+    app_commands.Choice(name="最近3個月", value="3months"),
+])
+async def attendance_stats_slash(
+    interaction: discord.Interaction,
+    period: Optional[str] = "current",
+    min_events: Optional[int] = 3
+):
+    """查看用戶出席率統計"""
+    await interaction.response.defer()
+    
+    try:
+        if not interaction.user.guild_permissions.administrator:
+            embed = discord.Embed(
+                title="❌ 權限不足",
+                description="只有管理員可以查看出席率統計",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, username, activity_stats
+            FROM users
+        """)
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        if not results:
+            embed = discord.Embed(
+                title="📊 出席率統計",
+                description="資料庫中沒有用戶資料",
+                color=0xFFFF00
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        current_period = get_current_half_month()
+        now = datetime.now()
+        three_months_ago = now - timedelta(days=90)
+        
+        attendance_data = []
+        
+        for user_id, username, activity_str in results:
+            activity_stats = json.loads(activity_str) if activity_str else {}
+            
+            if period == "current":
+                # 只計算當前半月期
+                period_data = activity_stats.get(current_period, {})
+                total_events = period_data.get("total", 0)
+                attended_events = period_data.get("attended", 0)
+                
+                if total_events >= min_events:
+                    attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
+                    attendance_data.append({
+                        "user_id": user_id,
+                        "username": username,
+                        "attendance_rate": attendance_rate,
+                        "total_events": total_events,
+                        "attended_events": attended_events,
+                        "period": current_period
+                    })
+            
+            elif period == "3months":
+                # 計算最近3個月
+                total_events = 0
+                attended_events = 0
+                
+                for period_name, data in activity_stats.items():
+                    # 解析期間日期
+                    try:
+                        period_year_month = period_name.split("-上半")[0] if "-上半" in period_name else period_name.split("-下半")[0]
+                        period_year, period_month = map(int, period_year_month.split("-"))
+                        
+                        # 檢查是否在最近3個月內
+                        period_date = datetime(period_year, period_month, 15)  # 使用月中作為代表
+                        if period_date >= three_months_ago:
+                            total_events += data.get("total", 0)
+                            attended_events += data.get("attended", 0)
+                    except:
+                        continue
+                
+                if total_events >= min_events:
+                    attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
+                    attendance_data.append({
+                        "user_id": user_id,
+                        "username": username,
+                        "attendance_rate": attendance_rate,
+                        "total_events": total_events,
+                        "attended_events": attended_events,
+                        "period": "最近3個月"
+                    })
+            
+            else:  # "all"
+                # 計算所有期間
+                total_events = 0
+                attended_events = 0
+                
+                for data in activity_stats.values():
+                    total_events += data.get("total", 0)
+                    attended_events += data.get("attended", 0)
+                
+                if total_events >= min_events:
+                    attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
+                    attendance_data.append({
+                        "user_id": user_id,
+                        "username": username,
+                        "attendance_rate": attendance_rate,
+                        "total_events": total_events,
+                        "attended_events": attended_events,
+                        "period": "所有期間"
+                    })
+        
+        # 按出席率排序（高到低）
+        attendance_data.sort(key=lambda x: x["attendance_rate"], reverse=True)
+        
+        # 統計
+        total_users = len(attendance_data)
+        if total_users == 0:
+            embed = discord.Embed(
+                title="📊 出席率統計",
+                description=f"沒有找到符合條件的用戶（最低活動次數：{min_events}次）",
+                color=0xFFFF00
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        avg_attendance_rate = sum(d["attendance_rate"] for d in attendance_data) / total_users
+        perfect_attendance = sum(1 for d in attendance_data if d["attendance_rate"] == 100)
+        good_attendance = sum(1 for d in attendance_data if d["attendance_rate"] >= 80)
+        poor_attendance = sum(1 for d in attendance_data if d["attendance_rate"] < 50)
+        
+        # 創建分頁
+        users_per_page = 15
+        pages = []
+        
+        for i in range(0, len(attendance_data), users_per_page):
+            embed = discord.Embed(
+                title=f"📊 出席率排行榜 - {attendance_data[0]['period']}",
+                description=f"顯示 {min(i + users_per_page, len(attendance_data))}/{len(attendance_data)} 位用戶\n"
+                          f"（過濾條件：至少參加過 {min_events} 次活動）",
+                color=0x3498DB
+            )
+            
+            # 統計資訊
+            embed.add_field(
+                name="📈 統計摘要",
+                value=f"**總用戶數：** {total_users} 人\n"
+                      f"**平均出席率：** {avg_attendance_rate:.1f}%\n"
+                      f"**全勤用戶：** {perfect_attendance} 人 (100%)\n"
+                      f"**良好出席：** {good_attendance} 人 (≥80%)\n"
+                      f"**出席率低：** {poor_attendance} 人 (<50%)",
+                inline=False
+            )
+            
+            # 排行榜
+            leaderboard = ""
+            for j, data in enumerate(attendance_data[i:i + users_per_page], i + 1):
+                medal = "🥇 " if j == 1 else "🥈 " if j == 2 else "🥉 " if j == 3 else f"{j}. "
+                
+                # 獲取 Discord 用戶
+                discord_user = interaction.guild.get_member(data["user_id"])
+                display_name = discord_user.display_name if discord_user else data["username"]
+                
+                leaderboard += f"{medal}**{display_name}**\n"
+                leaderboard += f"   出席率：{data['attendance_rate']:.1f}% "
+                leaderboard += f"({data['attended_events']}/{data['total_events']}次)\n"
+                
+                if j % 5 == 0:
+                    leaderboard += "  ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            
+            embed.add_field(
+                name="🏆 出席率排行榜",
+                value=leaderboard,
+                inline=False
+            )
+            
+            embed.set_footer(text=f"最低活動次數：{min_events}次 | 頁面 {i//users_per_page + 1}/{(len(attendance_data)-1)//users_per_page + 1}")
+            pages.append(embed)
+        
+        if len(pages) == 1:
+            await interaction.followup.send(embed=pages[0])
+        else:
+            class AttendancePaginator(discord.ui.View):
+                def __init__(self, pages, timeout=180):
+                    super().__init__(timeout=timeout)
+                    self.pages = pages
+                    self.current_page = 0
+                    self.update_buttons()
+                
+                def update_buttons(self):
+                    self.children[0].disabled = self.current_page == 0
+                    self.children[1].disabled = self.current_page == len(self.pages) - 1
+                
+                @discord.ui.button(label="上一頁", style=discord.ButtonStyle.secondary, emoji="⬅️")
+                async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if self.current_page > 0:
+                        self.current_page -= 1
+                        self.update_buttons()
+                        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+                
+                @discord.ui.button(label="下一頁", style=discord.ButtonStyle.secondary, emoji="➡️")
+                async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if self.current_page < len(self.pages) - 1:
+                        self.current_page += 1
+                        self.update_buttons()
+                        await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
+            
+            view = AttendancePaginator(pages)
+            await interaction.followup.send(embed=pages[0], view=view)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 讀取出席率失敗",
             description=f"錯誤：{str(e)}",
             color=0xFF0000
         )
