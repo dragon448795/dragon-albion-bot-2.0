@@ -557,6 +557,15 @@ async def end_evaluation(event_id, channel, event_name):
 # ========== 事件處理 ==========
 
 @bot.event
+async def setup_hook():
+    """機器人設置鉤子，在on_ready之前執行"""
+    print("🔄 正在設置指令樹...")
+    
+    # 註冊所有指令
+    await bot.tree.sync()
+    print("✅ 指令樹設置完成")
+
+@bot.event
 async def on_ready():
     """機器人上線"""
     print(f"\n{'='*60}")
@@ -568,8 +577,18 @@ async def on_ready():
     print("✅ 資料庫初始化完成")
     
     try:
-        print("\n🔄 正在同步指令...")
+        print("\n🔄 正在強制同步指令...")
+        # 清除所有現有指令
+        bot.tree.clear_commands(guild=None)
+        
+        # 重新同步全局指令
         synced = await bot.tree.sync()
+        
+        # 同步到每個伺服器
+        for guild in bot.guilds:
+            await bot.tree.sync(guild=guild)
+            print(f"✅ 已同步指令到伺服器: {guild.name}")
+        
         print(f"✅ 已同步 {len(synced)} 個指令")
         
         # 顯示可用指令
@@ -1069,11 +1088,18 @@ async def sync_slash(interaction: discord.Interaction):
         return
     
     try:
+        print("🔄 強制同步指令中...")
+        bot.tree.clear_commands(guild=None)
         global_synced = await bot.tree.sync()
+        
+        # 同步到所有伺服器
+        for guild in bot.guilds:
+            await bot.tree.sync(guild=guild)
+            print(f"✅ 已同步指令到伺服器: {guild.name}")
         
         embed = discord.Embed(
             title="🔄 指令同步完成",
-            description=f"已同步 {len(global_synced)} 個指令",
+            description=f"已同步 {len(global_synced)} 個指令到所有伺服器",
             color=0x43B581
         )
         
@@ -2824,6 +2850,17 @@ async def attendance_stats_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
+
+# 添加測試指令
+@bot.tree.command(name="test", description="測試指令是否正常")
+async def test_slash(interaction: discord.Interaction):
+    """測試指令"""
+    await interaction.response.send_message("✅ 指令測試正常！")
+
+@bot.tree.command(name="ping", description="測試機器人延遲")
+async def ping_slash(interaction: discord.Interaction):
+    """測試延遲"""
+    await interaction.response.send_message(f"🏓 Pong! 延遲: {round(bot.latency * 1000)}ms")
 
 # ========== 主程式 ==========
 
