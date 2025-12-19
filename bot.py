@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小雲ALBION機械人 - 簡化評核版本
-主持人按EMOJI評核，預設為普通評級
+小雲ALBION機械人 - 完整功能版本
+13個指令全部可用
 """
 
 import os
@@ -162,7 +162,7 @@ def init_db():
         rating_message_id INTEGER,
         channel_id INTEGER,
         participants TEXT DEFAULT '[]',
-        default_rated TEXT DEFAULT '[]',   --已預設評級的用戶
+        default_rated TEXT DEFAULT '[]',
         professions TEXT DEFAULT '{}',
         ratings TEXT DEFAULT '{}',
         is_active BOOLEAN DEFAULT 1,
@@ -371,7 +371,6 @@ def update_user_rating(user_id, rating_type):
                 WHERE user_id = ?
             """, (score, score, score, user_id))
         
-        # 修復：更新評級統計數據到資料庫
         cursor.execute("UPDATE users SET rating_stats = ? WHERE user_id = ?", 
                       (json.dumps(rating_stats), user_id))
         
@@ -477,7 +476,6 @@ async def end_evaluation(event_id, channel, event_name):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        # 獲取活動數據
         cursor.execute("""
             SELECT participants, professions, ratings, rating_message_id 
             FROM evaluation_events 
@@ -495,17 +493,14 @@ async def end_evaluation(event_id, channel, event_name):
         professions = json.loads(professions_json) if professions_json else {}
         ratings = json.loads(ratings_json) if ratings_json else {}
         
-        # 標記活動為不活躍
         cursor.execute("UPDATE evaluation_events SET is_active = 0 WHERE id = ?", (event_id,))
         conn.commit()
         conn.close()
         
-        # 嘗試清除評核訊息的反應
         try:
             rating_message = await channel.fetch_message(rating_message_id)
             await rating_message.clear_reactions()
             
-            # 更新評核訊息
             end_embed = discord.Embed(
                 title=f"✅ 評核活動已結束：{event_name}",
                 description="此活動的評核階段已經結束，感謝所有參與者！",
@@ -514,7 +509,6 @@ async def end_evaluation(event_id, channel, event_name):
             
             end_embed.add_field(name="📊 統計信息", value=f"**總參與人數：** {len(participants)} 人", inline=False)
             
-            # 顯示評級分佈
             rating_summary = {}
             for user_id, rating_list in ratings.items():
                 if rating_list:
@@ -535,7 +529,6 @@ async def end_evaluation(event_id, channel, event_name):
         except Exception as e:
             print(f"更新評核訊息錯誤: {e}")
         
-        # 發送結束通知
         summary_embed = discord.Embed(
             title=f"🏁 活動總結：{event_name}",
             description="評核活動已正式結束！",
@@ -558,12 +551,13 @@ async def end_evaluation(event_id, channel, event_name):
 
 @bot.event
 async def setup_hook():
-    """機器人設置鉤子，在on_ready之前執行"""
+    """機器人設置鉤子"""
     print("🔄 正在設置指令樹...")
-    
-    # 註冊所有指令
-    await bot.tree.sync()
-    print("✅ 指令樹設置完成")
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ 指令樹設置完成，已同步 {len(synced)} 個指令")
+    except Exception as e:
+        print(f"❌ 設置指令樹失敗: {e}")
 
 @bot.event
 async def on_ready():
@@ -576,27 +570,35 @@ async def on_ready():
     init_db()
     print("✅ 資料庫初始化完成")
     
+    # 等待一下再同步指令
+    await asyncio.sleep(2)
+    
     try:
-        print("\n🔄 正在強制同步指令...")
-        # 清除所有現有指令
+        print("🔄 正在同步指令...")
+        
+        # 先清除所有現有指令
         bot.tree.clear_commands(guild=None)
         
         # 重新同步全局指令
         synced = await bot.tree.sync()
         
-        # 同步到每個伺服器
-        for guild in bot.guilds:
-            await bot.tree.sync(guild=guild)
-            print(f"✅ 已同步指令到伺服器: {guild.name}")
-        
         print(f"✅ 已同步 {len(synced)} 個指令")
         
         # 顯示可用指令
-        print("\n📋 可用指令:")
-        for cmd in synced:
-            print(f"  • /{cmd.name} - {cmd.description}")
+        if synced:
+            print("\n📋 可用指令:")
+            for cmd in synced:
+                print(f"  • /{cmd.name} - {cmd.description}")
+        
     except Exception as e:
         print(f"❌ 同步失敗: {e}")
+        # 如果失敗，嘗試延遲後再試一次
+        try:
+            await asyncio.sleep(3)
+            synced = await bot.tree.sync()
+            print(f"✅ 重試後已同步 {len(synced)} 個指令")
+        except Exception as e2:
+            print(f"❌ 重試也失敗: {e2}")
     
     await bot.change_presence(
         activity=discord.Activity(
@@ -609,7 +611,7 @@ async def on_ready():
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    """處理反應事件 - 簡化評核版本"""
+    """處理反應事件"""
     if payload.user_id == bot.user.id:
         return
     
@@ -617,12 +619,10 @@ async def on_raw_reaction_add(payload):
         emoji = str(payload.emoji)
         user_id = payload.user_id
         
-        # 取得頻道
         channel = bot.get_channel(payload.channel_id)
         if not channel:
             return
         
-        # 獲取訊息
         try:
             message = await channel.fetch_message(payload.message_id)
         except:
@@ -631,7 +631,7 @@ async def on_raw_reaction_add(payload):
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        # 先檢查是否為評核結束反應
+        # 檢查是否為評核結束反應
         cursor.execute("""
             SELECT id, channel_id, event_name 
             FROM evaluation_events 
@@ -642,12 +642,10 @@ async def on_raw_reaction_add(payload):
         if rating_event and emoji == RATING_END_EMOJI:
             event_id, event_channel_id, event_name = rating_event
             
-            # 檢查是否為管理員
             try:
                 guild = channel.guild
                 member = await guild.fetch_member(user_id)
                 if not member.guild_permissions.administrator:
-                    # 不是管理員，移除反應
                     try:
                         await message.remove_reaction(emoji, member)
                         await channel.send(f"❌ <@{user_id}> 只有管理員可以結束評核活動！", delete_after=5)
@@ -660,14 +658,9 @@ async def on_raw_reaction_add(payload):
                 conn.close()
                 return
             
-            # 確認結束評核
             confirm_embed = discord.Embed(
                 title="🏁 確認結束評核活動",
-                description=f"你確定要結束 **{event_name}** 的評核階段嗎？\n\n"
-                          f"結束後將：\n"
-                          f"• 無法再進行評核\n"
-                          f"• 清除評核訊息的所有反應\n"
-                          f"• 活動標記為已完成",
+                description=f"你確定要結束 **{event_name}** 的評核階段嗎？",
                 color=discord.Color.orange()
             )
             
@@ -685,11 +678,8 @@ async def on_raw_reaction_add(payload):
                         return
                     
                     await interaction.response.defer()
-                    
-                    # 結束評核活動
                     await end_evaluation(self.event_id, self.channel, self.event_name)
                     
-                    # 禁用按鈕
                     for child in self.children:
                         child.disabled = True
                     await interaction.message.edit(view=self)
@@ -704,7 +694,6 @@ async def on_raw_reaction_add(payload):
                     
                     await interaction.response.send_message("已取消結束評核活動", ephemeral=True)
                     
-                    # 禁用按鈕
                     for child in self.children:
                         child.disabled = True
                     await interaction.message.edit(view=self)
@@ -722,12 +711,10 @@ async def on_raw_reaction_add(payload):
             
             print(f"檢測到評核反應: event_id={event_id}, rating_type={rating_type}, user_id={user_id}")
             
-            # 檢查是否為管理員
             try:
                 guild = channel.guild
                 member = await guild.fetch_member(user_id)
                 if not member.guild_permissions.administrator:
-                    # 不是管理員，移除反應
                     try:
                         await message.remove_reaction(emoji, member)
                         await channel.send(f"❌ <@{user_id}> 只有管理員可以進行評核！", delete_after=5)
@@ -754,7 +741,6 @@ async def on_raw_reaction_add(payload):
             
             print(f"活動 {event_name} 有 {len(participants)} 位參與者可以評核")
             
-            # 創建選擇參與者的視窗
             class ParticipantSelectView(discord.ui.View):
                 def __init__(self, participants, event_id, rating_type, channel, bot_instance):
                     super().__init__(timeout=60)
@@ -764,18 +750,16 @@ async def on_raw_reaction_add(payload):
                     self.channel = channel
                     self.bot = bot_instance
                     
-                    # 建立選項
                     options = []
-                    for pid in participants[:25]:  # Discord限制最多25個選項
+                    for pid in participants[:25]:
                         member = self.bot.get_user(int(pid))
                         display_name = member.display_name if member else f"用戶ID: {pid}"
                         options.append(discord.SelectOption(
-                            label=display_name[:100],  # Discord限制標題長度
+                            label=display_name[:100],
                             value=str(pid),
                             description=f"點擊選擇此用戶進行 {rating_type} 評核"
                         ))
                     
-                    # 建立選擇器
                     select = discord.ui.Select(
                         placeholder=f"選擇要評核為 {rating_type} 的參與者",
                         options=options,
@@ -783,7 +767,6 @@ async def on_raw_reaction_add(payload):
                         max_values=1
                     )
                     
-                    # 定義回調函數
                     async def select_callback(interaction: discord.Interaction):
                         if not interaction.user.guild_permissions.administrator:
                             await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
@@ -805,12 +788,10 @@ async def on_raw_reaction_add(payload):
                         if result and result[0]:
                             ratings = json.loads(result[0])
                         
-                        # 檢查之前的評級
                         old_rating = None
                         if str(selected_user_id) in ratings and ratings[str(selected_user_id)]:
                             old_rating = ratings[str(selected_user_id)][-1]["rating"] if ratings[str(selected_user_id)] else None
                         
-                        # 更新評級
                         if str(selected_user_id) not in ratings:
                             ratings[str(selected_user_id)] = []
                         
@@ -825,14 +806,11 @@ async def on_raw_reaction_add(payload):
                         conn.commit()
                         conn.close()
                         
-                        # 更新用戶評核統計（移除舊評級積分，加上新評級積分）
                         if old_rating and old_rating != self.rating_type:
-                            # 移除舊評級積分
                             old_score = RATING_SCORES.get(old_rating, 0)
                             update_user_score(selected_user_id, display_name, -old_score, f"評級變更: {old_rating} → {self.rating_type}")
                             print(f"移除舊評級積分: {old_rating} (-{old_score}分)")
                         
-                        # 加上新評級積分
                         new_score = RATING_SCORES.get(self.rating_type, 0)
                         update_user_rating(selected_user_id, self.rating_type)
                         
@@ -840,15 +818,13 @@ async def on_raw_reaction_add(payload):
                             update_user_score(selected_user_id, display_name, new_score, f"活動評核: {self.rating_type}")
                             print(f"添加新評級積分: {self.rating_type} (+{new_score}分)")
                         
-                        # 發送結果
                         score_change = RATING_SCORES.get(self.rating_type, 0)
-                        score_text = f"（積分變動: {'+' if score_change > 0 else ''}{score_change}分）" if score_change != 0 else ""
                         
                         if old_rating and old_rating != self.rating_type:
                             old_score = RATING_SCORES.get(old_rating, 0)
-                            result_text = f"已將 <@{selected_user_id}> ({display_name}) 的評級從 **{old_rating}** ({old_score}分) 變更為 **{self.rating_type}** {score_text}"
+                            result_text = f"已將 <@{selected_user_id}> ({display_name}) 的評級從 **{old_rating}** ({old_score}分) 變更為 **{self.rating_type}** ({'+' if score_change > 0 else ''}{score_change}分)"
                         else:
-                            result_text = f"已為 <@{selected_user_id}> ({display_name}) 評核：**{self.rating_type}** {score_text}"
+                            result_text = f"已為 <@{selected_user_id}> ({display_name}) 評核：**{self.rating_type}** ({'+' if score_change > 0 else ''}{score_change}分)"
                         
                         result_embed = discord.Embed(
                             title="✅ 評核完成",
@@ -862,7 +838,6 @@ async def on_raw_reaction_add(payload):
                         
                         await interaction.response.send_message(embed=result_embed)
                         
-                        # 禁用視窗
                         for child in self.children:
                             child.disabled = True
                         await interaction.message.edit(view=self)
@@ -871,8 +846,6 @@ async def on_raw_reaction_add(payload):
                     self.add_item(select)
             
             view = ParticipantSelectView(participants, event_id, rating_type, channel, bot)
-            
-            # 發送選擇視窗
             select_message = await channel.send(f"<@{user_id}> 請選擇要評核為 **{rating_type}** 的參與者：", view=view)
             print(f"已發送選擇視窗: message_id={select_message.id}")
             
@@ -902,7 +875,6 @@ async def on_raw_reaction_add(payload):
                     try:
                         if message.embeds:
                             embed = message.embeds[0]
-                            
                             new_embed = discord.Embed(
                                 title=embed.title,
                                 description=embed.description,
@@ -946,7 +918,6 @@ async def on_raw_reaction_add(payload):
             event_id, participants_json, signup_end_time_str = signup_event
             
             try:
-                # 安全解析時間
                 if signup_end_time_str:
                     try:
                         signup_end_time = datetime.strptime(signup_end_time_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
@@ -982,7 +953,6 @@ async def on_raw_reaction_add(payload):
                 try:
                     if message.embeds:
                         embed = message.embeds[0]
-                        
                         new_embed = discord.Embed(
                             title=embed.title,
                             description=embed.description,
@@ -1073,6 +1043,48 @@ async def on_raw_reaction_add(payload):
 
 # ========== 斜槓指令 ==========
 
+# 指令 1: help
+@bot.tree.command(name="help", description="顯示幫助訊息")
+async def help_slash(interaction: discord.Interaction):
+    """顯示幫助"""
+    embed = discord.Embed(
+        title="🤖 小雲機械人 - 幫助中心",
+        description="以下是可用指令列表：",
+        color=0x7289DA
+    )
+    
+    embed.add_field(
+        name="👤 用戶指令",
+        value=(
+            "`/help` - 顯示此幫助訊息\n"
+            "`/profile` - 查看我的數據\n"
+            "`/giveaway` - 創建抽獎\n"
+            "`/score_draw` - 使用積分抽獎\n"
+            "`/score_transfer` - 轉移積分\n"
+            "`/prizelist` - 查看彩池列表\n"
+            "`/random_team` - 隨機分組"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🛠️ 管理員指令",
+        value=(
+            "`/add_prize` - 調整彩池\n"
+            "`/add_score` - 加減積分\n"
+            "`/create_event` - 創建評核活動\n"
+            "`/all_profiles` - 查看所有用戶資料\n"
+            "`/attendance_stats` - 查看出席率統計\n"
+            "`/sync` - 同步指令（擁有者）\n"
+            "`/ping` - 測試機器人延遲"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(text="共13個指令 | 使用 / 開頭輸入指令")
+    await interaction.response.send_message(embed=embed)
+
+# 指令 2: sync
 @bot.tree.command(name="sync", description="同步斜槓指令（擁有者）")
 async def sync_slash(interaction: discord.Interaction):
     """同步指令"""
@@ -1088,18 +1100,13 @@ async def sync_slash(interaction: discord.Interaction):
         return
     
     try:
-        print("🔄 強制同步指令中...")
+        print("🔄 手動同步指令中...")
         bot.tree.clear_commands(guild=None)
-        global_synced = await bot.tree.sync()
-        
-        # 同步到所有伺服器
-        for guild in bot.guilds:
-            await bot.tree.sync(guild=guild)
-            print(f"✅ 已同步指令到伺服器: {guild.name}")
+        synced = await bot.tree.sync()
         
         embed = discord.Embed(
             title="🔄 指令同步完成",
-            description=f"已同步 {len(global_synced)} 個指令到所有伺服器",
+            description=f"已同步 {len(synced)} 個指令到所有伺服器",
             color=0x43B581
         )
         
@@ -1112,59 +1119,8 @@ async def sync_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
-@bot.tree.command(name="help", description="顯示幫助訊息 / 幫助")
-async def help_slash(interaction: discord.Interaction):
-    """顯示幫助"""
-    embed = discord.Embed(
-        title="🤖 小雲機械人 - 幫助中心",
-        description="以下是可用指令列表：",
-        color=0x7289DA
-    )
-    
-    embed.add_field(
-        name="👤 用戶指令",
-        value=(
-            "`/help` - 顯示此幫助訊息\n"
-            "`/profile` - 查看我的數據\n"
-            "`/giveaway [獎品] [時間]` - 創建抽獎\n"
-            "`/score_draw` - 使用積分抽獎\n"
-            "`/score_transfer [用戶] [積分]` - 轉移積分給其他用戶\n"
-            "`/prizelist` - 查看彩池列表\n"
-            "`/random_team [人數] [組數]` - 隨機分組"
-        ),
-        inline=False
-    )
-    
-    embed.add_field(
-        name="🛠️ 管理員指令",
-        value=(
-            "`/add_prize [名稱] [類型] [數量]` - 調整彩池\n"
-            "`/add_score [用戶] [積分] [原因]` - 加減積分\n"
-            "`/create_event [活動名稱]` - 創建評核活動\n"
-            "`/all_profiles [排序] [數量]` - 查看所有用戶資料\n"
-            "`/attendance_stats [期間]` - 查看出席率統計"
-        ),
-        inline=False
-    )
-    
-    embed.add_field(
-        name="💰 積分系統",
-        value=(
-            "**簽到獎勵：** 40積分\n"
-            "**職業加成：** 補師+20積分（其他職業無加成）\n"
-            "**評核獎勵：**\n"
-            "  • 優秀：+40積分\n"
-            "  • 良好：+10積分\n"
-            "  • 普通：+0積分（預設）\n"
-            "  • 不合格：-5積分"
-        ),
-        inline=False
-    )
-    
-    embed.set_footer(text="使用 / 開頭輸入指令")
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="profile", description="查看我的數據 / 我的數據")
+# 指令 3: profile
+@bot.tree.command(name="profile", description="查看我的數據")
 async def profile_slash(interaction: discord.Interaction):
     """查看用戶資料"""
     await interaction.response.defer()
@@ -1217,9 +1173,7 @@ async def profile_slash(interaction: discord.Interaction):
             f"**當前半月期：** {current_period}\n"
             f"**總活動數：** {total_events} 次\n"
             f"**實際出席：** {attended_events} 次\n"
-            f"**出席率：** {attendance_rate:.1f}%\n\n"
-            f"**計算公式：** (實際出席次數 ÷ 總活動數) × 100%\n"
-            f"**註：** 僅計算活動時間內簽到，過時簽到不計入"
+            f"**出席率：** {attendance_rate:.1f}%\n"
         )
         
         embed.add_field(
@@ -1229,8 +1183,7 @@ async def profile_slash(interaction: discord.Interaction):
         )
         
         score_info = f"**當前積分：** {current_score} 分\n"
-        score_info += f"**總獲得積分：** {total_score} 分\n"
-        score_info += f"**現有積分可用：** {current_score} 分\n\n"
+        score_info += f"**總獲得積分：** {total_score} 分\n\n"
         score_info += f"**積分規則：**\n"
         score_info += f"• 簽到：+{SIGNUP_SCORE}分\n"
         for profession, bonus in PROFESSION_BONUS.items():
@@ -1288,7 +1241,6 @@ async def profile_slash(interaction: discord.Interaction):
         
         embed.add_field(name="用戶ID", value=f"`{user_id}`", inline=True)
         embed.add_field(name="加入日期", value=join_date_str, inline=True)
-        embed.add_field(name="Discord加入", value=interaction.user.created_at.strftime('%Y-%m-%d'), inline=True)
         
         if interaction.user.avatar:
             embed.set_thumbnail(url=interaction.user.avatar.url)
@@ -1303,7 +1255,8 @@ async def profile_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="giveaway", description="創建抽獎活動 / 抽獎")
+# 指令 4: giveaway
+@bot.tree.command(name="giveaway", description="創建抽獎活動")
 @app_commands.describe(
     prize="獎品內容",
     duration="抽獎持續時間（例如：60s, 1m, 1h, 1d）",
@@ -1319,9 +1272,8 @@ async def giveaway_slash(
     await interaction.response.defer()
     
     try:
-        # 解析時間
         duration_lower = duration.lower().strip()
-        seconds = 3600  # 預設1小時
+        seconds = 3600
         
         if duration_lower.endswith('s'):
             seconds = int(duration_lower[:-1])
@@ -1344,7 +1296,6 @@ async def giveaway_slash(
         
         end_time = datetime.now() + timedelta(seconds=seconds)
         
-        # 格式化時間顯示
         if seconds < 60:
             time_display = f"{seconds}秒"
         elif seconds < 3600:
@@ -1459,9 +1410,9 @@ async def giveaway_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
-        print(f"Giveaway error: {e}")
 
-@bot.tree.command(name="score_draw", description="使用積分抽獎 / 積分抽獎")
+# 指令 5: score_draw
+@bot.tree.command(name="score_draw", description="使用積分抽獎")
 async def score_draw_slash(interaction: discord.Interaction):
     """積分抽獎"""
     await interaction.response.defer()
@@ -1600,7 +1551,8 @@ async def score_draw_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="score_transfer", description="轉移積分給其他用戶 / 積分過戶")
+# 指令 6: score_transfer
+@bot.tree.command(name="score_transfer", description="轉移積分給其他用戶")
 @app_commands.describe(
     user="目標用戶",
     amount="轉移積分",
@@ -1666,7 +1618,8 @@ async def score_transfer_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="prizelist", description="查看彩池列表 / 彩池")
+# 指令 7: prizelist
+@bot.tree.command(name="prizelist", description="查看彩池列表")
 async def prizelist_slash(interaction: discord.Interaction):
     """查看彩池"""
     await interaction.response.defer()
@@ -1674,17 +1627,6 @@ async def prizelist_slash(interaction: discord.Interaction):
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prize_pool'")
-        if not cursor.fetchone():
-            embed = discord.Embed(
-                title="❌ 彩池表格不存在",
-                description="請重新啟動機器人以初始化資料庫",
-                color=0xFF0000
-            )
-            await interaction.followup.send(embed=embed)
-            conn.close()
-            return
         
         cursor.execute("""
             SELECT box_level, 
@@ -1774,7 +1716,8 @@ async def prizelist_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="random_team", description="隨機分組 / 隨機分組")
+# 指令 8: random_team
+@bot.tree.command(name="random_team", description="隨機分組")
 @app_commands.describe(
     team_size="每組人數",
     team_count="組數"
@@ -1925,9 +1868,8 @@ async def random_team_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# ========== 管理員指令 ==========
-
-@bot.tree.command(name="add_prize", description="添加獎品到彩池 / 調整彩池")
+# 指令 9: add_prize (管理員)
+@bot.tree.command(name="add_prize", description="添加獎品到彩池")
 @app_commands.describe(
     name="獎品名稱",
     box_level="寶箱等級 (綠箱/藍箱/紫箱/金箱)",
@@ -1954,17 +1896,6 @@ async def add_prize_slash(
         
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prize_pool'")
-        if not cursor.fetchone():
-            error_embed = discord.Embed(
-                title="❌ 彩池表格不存在",
-                description="請重新啟動機器人以初始化資料庫",
-                color=0xFF0000
-            )
-            await interaction.followup.send(embed=error_embed)
-            conn.close()
-            return
         
         if quantity > 0:
             cursor.execute('''
@@ -2048,7 +1979,8 @@ async def add_prize_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="add_score", description="調整用戶積分 / 加減積分")
+# 指令 10: add_score (管理員)
+@bot.tree.command(name="add_score", description="調整用戶積分")
 @app_commands.describe(
     user="目標用戶",
     amount="積分變化（正數為增加，負數為減少）",
@@ -2100,7 +2032,8 @@ async def add_score_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="create_event", description="創建評核活動 / 創建評核活動")
+# 指令 11: create_event (管理員)
+@bot.tree.command(name="create_event", description="創建評核活動")
 @app_commands.describe(
     event_name="活動名稱",
     signup_time="簽到時間（分鐘）",
@@ -2112,7 +2045,7 @@ async def create_event_slash(
     signup_time: int = 5,
     prize: Optional[str] = None
 ):
-    """創建評核活動 - 簡化評核版本"""
+    """創建評核活動"""
     await interaction.response.defer()
     
     try:
@@ -2120,7 +2053,6 @@ async def create_event_slash(
             await interaction.followup.send("❌ 需要管理員權限")
             return
         
-        # 建立簽到訊息
         signup_embed = discord.Embed(
             title=f"📋 評核活動：{event_name}",
             color=discord.Color.blue()
@@ -2131,7 +2063,7 @@ async def create_event_slash(
         
         signup_embed.add_field(
             name="📝 簽到階段",
-            value=f"請在活動開始後 {signup_time} 分鐘內按 ✅ 簽到\n超過時間簽到將不計算出席率",
+            value=f"請在活動開始後 {signup_time} 分鐘內按 ✅ 簽到",
             inline=False
         )
         
@@ -2140,11 +2072,9 @@ async def create_event_slash(
         signup_embed.add_field(name="⏱️ 剩餘時間", value=f"{signup_time} 分鐘", inline=True)
         signup_embed.set_footer(text=f"半月期: {get_current_half_month()}")
         
-        # 發送簽到訊息
         signup_message = await interaction.followup.send(embed=signup_embed, wait=True)
         await signup_message.add_reaction("✅")
         
-        # 建立職業選擇訊息
         class_embed = discord.Embed(
             title=f"🎮 職業選擇：{event_name}",
             description="請選擇你的職業：\n\n🛡️ 坦克\n⚔️ 输出\n💚 治疗\n💛 辅助\n\n**注意：請先完成簽到再選擇職業！**",
@@ -2156,10 +2086,8 @@ async def create_event_slash(
         for emoji in ["🛡️", "⚔️", "💚", "💛"]:
             await class_msg.add_reaction(emoji)
         
-        # 計算簽到結束時間
         signup_end_time = datetime.now() + timedelta(minutes=signup_time)
         
-        # 保存到資料庫
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         cursor.execute('''
@@ -2169,7 +2097,7 @@ async def create_event_slash(
         conn.commit()
         conn.close()
         
-        print(f"✅ 活動創建成功: {event_name}, 簽到訊息ID: {signup_message.id}, 職業訊息ID: {class_msg.id}")
+        print(f"✅ 活動創建成功: {event_name}")
         
         async def signup_countdown():
             remaining_minutes = signup_time
@@ -2188,6 +2116,7 @@ async def create_event_slash(
                     if result and result[0]:
                         participants = json.loads(result[0])
                         participants_count = len(participants)
+                    conn.close()
                     
                     updated_embed = discord.Embed(
                         title=f"📋 評核活動：{event_name}",
@@ -2199,7 +2128,7 @@ async def create_event_slash(
                     
                     updated_embed.add_field(
                         name="📝 簽到階段",
-                        value=f"請在活動開始後 {signup_time} 分鐘內按 ✅ 簽到\n超過時間簽到將不計算出席率",
+                        value=f"請在活動開始後 {signup_time} 分鐘內按 ✅ 簽到",
                         inline=False
                     )
                     
@@ -2209,12 +2138,10 @@ async def create_event_slash(
                     updated_embed.set_footer(text=f"半月期: {get_current_half_month()}")
                     
                     await signup_message.edit(embed=updated_embed)
-                    conn.close()
                     
                 except Exception as e:
                     print(f"更新簽到訊息錯誤: {e}")
             
-            # 簽到時間結束
             try:
                 conn = sqlite3.connect(DB_NAME)
                 cursor = conn.cursor()
@@ -2225,22 +2152,16 @@ async def create_event_slash(
                 if result and result[0]:
                     participants = json.loads(result[0])
                 
-                # 為所有簽到成功的用戶給予預設「普通」評級
                 for user_id in participants:
-                    # 簽到成功獎勵40積分
                     update_user_score(user_id, f"用戶{user_id}", SIGNUP_SCORE, f"活動簽到: {event_name}")
-                    # 更新活動統計
                     update_user_activity(user_id, event_name, attended=True)
-                    # 給予預設「普通」評級（0積分）
                     update_user_rating(user_id, "普通")
                 
-                # 記錄已預設評級的用戶
                 cursor.execute("UPDATE evaluation_events SET default_rated = ?, is_active = 1 WHERE signup_message_id = ?", 
                              (json.dumps(participants), signup_message.id))
                 conn.commit()
                 conn.close()
                 
-                # 更新簽到結束訊息
                 end_embed = discord.Embed(
                     title=f"📋 評核活動：{event_name}",
                     description="**簽到已結束！所有參與者已獲得預設「普通」評級（0積分）**",
@@ -2266,19 +2187,10 @@ async def create_event_slash(
                 await signup_message.edit(embed=end_embed)
                 await signup_message.clear_reactions()
                 
-                print(f"✅ 簽到結束: {event_name}, 參與者: {len(participants)}人, 已給予預設普通評級")
-                
-                # 創建評核階段訊息
                 rating_embed = discord.Embed(
                     title=f"⭐ 評核階段：{event_name}",
                     description="**主持人可以按下方EMOJI調整評級**\n\n"
-                              f"所有參與者已獲得預設「普通」評級（{RATING_SCORES['普通']}積分）\n"
-                              f"請主持人針對表現優秀或需要改進的成員調整評級：\n\n"
-                              f"⭐ 優秀：+{RATING_SCORES['優秀']}積分\n"
-                              f"👍 良好：+{RATING_SCORES['良好']}積分\n"
-                              f"👌 普通：{RATING_SCORES['普通']}積分（預設）\n"
-                              f"❌ 不合格：{RATING_SCORES['不合格']}積分\n\n"
-                              f"**使用方法：**\n1. 點擊下方對應的EMOJI\n2. 在彈出的視窗中選擇用戶\n3. 系統會自動更新評級",
+                              f"所有參與者已獲得預設「普通」評級（{RATING_SCORES['普通']}積分）\n",
                     color=discord.Color.gold()
                 )
                 
@@ -2292,11 +2204,9 @@ async def create_event_slash(
                 
                 rating_msg = await interaction.channel.send(embed=rating_embed)
                 
-                # 添加評核EMOJI（包括結束EMOJI）
                 for emoji in ["⭐", "👍", "👌", "❌", RATING_END_EMOJI]:
                     await rating_msg.add_reaction(emoji)
                 
-                # 更新資料庫中的評核訊息ID
                 conn = sqlite3.connect(DB_NAME)
                 cursor = conn.cursor()
                 cursor.execute("UPDATE evaluation_events SET rating_message_id = ? WHERE signup_message_id = ?", 
@@ -2317,9 +2227,6 @@ async def create_event_slash(
             color=discord.Color.green()
         )
         
-        success_embed.add_field(name="簽到訊息", value=f"[點擊查看](https://discord.com/channels/{interaction.guild.id}/{interaction.channel.id}/{signup_message.id})", inline=True)
-        success_embed.add_field(name="職業選擇", value=f"[點擊查看](https://discord.com/channels/{interaction.guild.id}/{interaction.channel.id}/{class_msg.id})", inline=True)
-        
         await interaction.followup.send(embed=success_embed, ephemeral=True)
         
     except Exception as e:
@@ -2330,7 +2237,8 @@ async def create_event_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="all_profiles", description="查看所有用戶資料 / 所有用戶數據")
+# 指令 12: all_profiles (管理員)
+@bot.tree.command(name="all_profiles", description="查看所有用戶資料")
 @app_commands.describe(
     sort_by="排序方式",
     limit="顯示數量"
@@ -2340,9 +2248,6 @@ async def create_event_slash(
     app_commands.Choice(name="總獲得積分(高到低)", value="total_score"),
     app_commands.Choice(name="加入日期(早到晚)", value="join_date"),
     app_commands.Choice(name="最後活躍(近到遠)", value="last_active"),
-    app_commands.Choice(name="出席率(高到低)", value="attendance_rate"),
-    app_commands.Choice(name="總活動次數(多到少)", value="total_events"),
-    app_commands.Choice(name="實際出席次數(多到少)", value="attended_events"),
 ])
 async def all_profiles_slash(
     interaction: discord.Interaction,
@@ -2353,7 +2258,6 @@ async def all_profiles_slash(
     await interaction.response.defer()
     
     try:
-        # 檢查管理員權限
         if not interaction.user.guild_permissions.administrator:
             embed = discord.Embed(
                 title="❌ 權限不足",
@@ -2369,10 +2273,9 @@ async def all_profiles_slash(
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        # 獲取所有用戶資料
         cursor.execute("""
             SELECT user_id, username, current_score, total_score, join_date, 
-                   last_active, activity_stats, rating_stats, profession_counts
+                   last_active, activity_stats
             FROM users
         """)
         
@@ -2388,40 +2291,18 @@ async def all_profiles_slash(
             await interaction.followup.send(embed=embed)
             return
         
-        # 處理用戶數據，計算出席率
         processed_users = []
         current_period = get_current_half_month()
         
         for row in results:
-            user_id, username, current_score, total_score, join_date, last_active, activity_str, rating_str, profession_str = row
+            user_id, username, current_score, total_score, join_date, last_active, activity_str = row
             
-            # 計算出席率
             activity_stats = json.loads(activity_str) if activity_str else {}
             
-            # 方法1：計算當前半月期的出席率
             current_period_data = activity_stats.get(current_period, {})
             total_events = current_period_data.get("total", 0)
             attended_events = current_period_data.get("attended", 0)
             current_attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
-            
-            # 方法2：計算總出席率
-            total_all_events = 0
-            total_all_attended = 0
-            for period, data in activity_stats.items():
-                total_all_events += data.get("total", 0)
-                total_all_attended += data.get("attended", 0)
-            overall_attendance_rate = (total_all_attended / total_all_events * 100) if total_all_events > 0 else 0.0
-            
-            # 評核統計
-            rating_stats = json.loads(rating_str) if rating_str else {}
-            total_ratings = sum(rating_stats.values()) if rating_stats else 0
-            excellent_ratings = rating_stats.get("優秀", 0)
-            good_ratings = rating_stats.get("良好", 0)
-            poor_ratings = rating_stats.get("不合格", 0)
-            
-            # 職業統計
-            profession_counts = json.loads(profession_str) if profession_str else {}
-            total_professions = sum(profession_counts.values()) if profession_counts else 0
             
             processed_users.append({
                 "user_id": user_id,
@@ -2431,26 +2312,15 @@ async def all_profiles_slash(
                 "join_date": join_date,
                 "last_active": last_active,
                 "current_attendance_rate": current_attendance_rate,
-                "overall_attendance_rate": overall_attendance_rate,
-                "total_events": total_all_events,
-                "attended_events": total_all_attended,
-                "total_ratings": total_ratings,
-                "excellent_ratings": excellent_ratings,
-                "good_ratings": good_ratings,
-                "poor_ratings": poor_ratings,
-                "total_professions": total_professions,
-                "activity_stats": activity_stats
+                "total_events": total_events,
+                "attended_events": attended_events,
             })
         
-        # 排序
         sort_functions = {
             "current_score": lambda x: x["current_score"],
             "total_score": lambda x: x["total_score"],
             "join_date": lambda x: x["join_date"],
             "last_active": lambda x: x["last_active"],
-            "attendance_rate": lambda x: x["overall_attendance_rate"],  # 新增：按總出席率排序
-            "total_events": lambda x: x["total_events"],  # 新增：按總活動次數排序
-            "attended_events": lambda x: x["attended_events"],  # 新增：按實際出席次數排序
         }
         
         reverse_order = {
@@ -2458,31 +2328,20 @@ async def all_profiles_slash(
             "total_score": True,
             "join_date": False,
             "last_active": True,
-            "attendance_rate": True,  # 出席率高到低
-            "total_events": True,     # 活動次數多到少
-            "attended_events": True,  # 出席次數多到少
         }
         
         sort_func = sort_functions.get(sort_by, lambda x: x["current_score"])
         reverse = reverse_order.get(sort_by, True)
         
         sorted_users = sorted(processed_users, key=sort_func, reverse=reverse)
-        
-        # 限制顯示數量
         display_users = sorted_users[:limit]
         
-        # 計算統計數據
         total_users = len(display_users)
         total_current_score = sum(u["current_score"] for u in display_users)
         total_total_score = sum(u["total_score"] for u in display_users)
         avg_current_score = total_current_score / total_users if total_users > 0 else 0
-        avg_total_score = total_total_score / total_users if total_users > 0 else 0
         
-        # 計算平均出席率
-        avg_attendance_rate = sum(u["overall_attendance_rate"] for u in display_users) / total_users if total_users > 0 else 0
-        
-        # 創建分頁視圖
-        profiles_per_page = 8  # 減少每頁數量，因為資訊變多了
+        profiles_per_page = 10
         pages = []
         
         for i in range(0, len(display_users), profiles_per_page):
@@ -2492,87 +2351,32 @@ async def all_profiles_slash(
                 color=0x43B581
             )
             
-            # 添加統計信息（根據排序方式顯示不同統計）
-            if sort_by == "attendance_rate":
-                embed.add_field(
-                    name="📈 出席率統計",
-                    value=f"**總用戶數：** {total_users} 人\n"
-                          f"**平均出席率：** {avg_attendance_rate:.1f}%\n"
-                          f"**最高出席率：** {max(u['overall_attendance_rate'] for u in display_users):.1f}%\n"
-                          f"**最低出席率：** {min(u['overall_attendance_rate'] for u in display_users):.1f}%",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="📈 統計摘要",
-                    value=f"**總用戶數：** {total_users} 人\n"
-                          f"**總現有積分：** {total_current_score} 分\n"
-                          f"**總歷史積分：** {total_total_score} 分\n"
-                          f"**平均現有積分：** {avg_current_score:.1f} 分\n"
-                          f"**平均出席率：** {avg_attendance_rate:.1f}%",
-                    inline=False
-                )
-            
-            # 添加排序信息
-            sort_names = {
-                "current_score": "現有積分（由高到低）",
-                "total_score": "總獲得積分（由高到低）",
-                "join_date": "加入日期（由早到晚）",
-                "last_active": "最後活躍（由近到遠）",
-                "attendance_rate": "總出席率（由高到低）",
-                "total_events": "總活動次數（由多到少）",
-                "attended_events": "實際出席次數（由多到少）",
-            }
-            
             embed.add_field(
-                name="📊 排序方式",
-                value=sort_names.get(sort_by, "現有積分"),
+                name="📈 統計摘要",
+                value=f"**總用戶數：** {total_users} 人\n"
+                      f"**總現有積分：** {total_current_score} 分\n"
+                      f"**總歷史積分：** {total_total_score} 分\n"
+                      f"**平均現有積分：** {avg_current_score:.1f} 分",
                 inline=False
             )
             
-            # 添加用戶列表
             user_list = ""
             for user in display_users[i:i + profiles_per_page]:
                 user_id = user["user_id"]
                 username = user["username"]
                 
-                # 獲取 Discord 用戶（如果可用）
                 discord_user = interaction.guild.get_member(user_id)
                 display_name = discord_user.display_name if discord_user else username
                 
                 user_list += f"**{display_name}**\n"
-                
-                if sort_by == "attendance_rate":
-                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
-                    user_list += f"  🎮 活動：{user['attended_events']}/{user['total_events']}次\n"
-                    user_list += f"  ⭐ 優秀評級：{user['excellent_ratings']}次\n"
-                elif sort_by == "total_events":
-                    user_list += f"  📋 總活動：{user['total_events']}次\n"
-                    user_list += f"  ✅ 出席：{user['attended_events']}次\n"
-                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
-                elif sort_by == "attended_events":
-                    user_list += f"  ✅ 出席次數：{user['attended_events']}次\n"
-                    user_list += f"  📋 總活動：{user['total_events']}次\n"
-                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
-                else:
-                    user_list += f"  🔹 現有積分：{user['current_score']}分\n"
-                    user_list += f"  📊 總積分：{user['total_score']}分\n"
-                    user_list += f"  📊 出席率：{user['overall_attendance_rate']:.1f}%\n"
-                
-                # 添加分隔線
+                user_list += f"  🔹 現有積分：{user['current_score']}分\n"
+                user_list += f"  📊 總積分：{user['total_score']}分\n"
+                user_list += f"  📊 出席率：{user['current_attendance_rate']:.1f}%\n"
                 user_list += "  ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             
             embed.add_field(
                 name="👥 用戶列表",
                 value=user_list if user_list else "無用戶資料",
-                inline=False
-            )
-            
-            # 添加當前半月期資訊
-            embed.add_field(
-                name="📅 當前半月期",
-                value=f"**{current_period}**\n"
-                      f"（每月1-15日為上半月，16-月底為下半月）",
                 inline=False
             )
             
@@ -2582,7 +2386,6 @@ async def all_profiles_slash(
         if len(pages) == 1:
             await interaction.followup.send(embed=pages[0])
         else:
-            # 創建分頁視圖
             current_page = 0
             
             class ProfilesPaginator(discord.ui.View):
@@ -2621,15 +2424,15 @@ async def all_profiles_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@bot.tree.command(name="attendance_stats", description="查看用戶出席率統計 / 出席率")
+# 指令 13: attendance_stats (管理員)
+@bot.tree.command(name="attendance_stats", description="查看用戶出席率統計")
 @app_commands.describe(
     period="統計期間",
-    min_events="最低活動次數（過濾活躍用戶）"
+    min_events="最低活動次數"
 )
 @app_commands.choices(period=[
     app_commands.Choice(name="當前半月期", value="current"),
     app_commands.Choice(name="所有期間", value="all"),
-    app_commands.Choice(name="最近3個月", value="3months"),
 ])
 async def attendance_stats_slash(
     interaction: discord.Interaction,
@@ -2670,16 +2473,12 @@ async def attendance_stats_slash(
             return
         
         current_period = get_current_half_month()
-        now = datetime.now()
-        three_months_ago = now - timedelta(days=90)
-        
         attendance_data = []
         
         for user_id, username, activity_str in results:
             activity_stats = json.loads(activity_str) if activity_str else {}
             
             if period == "current":
-                # 只計算當前半月期
                 period_data = activity_stats.get(current_period, {})
                 total_events = period_data.get("total", 0)
                 attended_events = period_data.get("attended", 0)
@@ -2695,38 +2494,7 @@ async def attendance_stats_slash(
                         "period": current_period
                     })
             
-            elif period == "3months":
-                # 計算最近3個月
-                total_events = 0
-                attended_events = 0
-                
-                for period_name, data in activity_stats.items():
-                    # 解析期間日期
-                    try:
-                        period_year_month = period_name.split("-上半")[0] if "-上半" in period_name else period_name.split("-下半")[0]
-                        period_year, period_month = map(int, period_year_month.split("-"))
-                        
-                        # 檢查是否在最近3個月內
-                        period_date = datetime(period_year, period_month, 15)  # 使用月中作為代表
-                        if period_date >= three_months_ago:
-                            total_events += data.get("total", 0)
-                            attended_events += data.get("attended", 0)
-                    except:
-                        continue
-                
-                if total_events >= min_events:
-                    attendance_rate = (attended_events / total_events * 100) if total_events > 0 else 0.0
-                    attendance_data.append({
-                        "user_id": user_id,
-                        "username": username,
-                        "attendance_rate": attendance_rate,
-                        "total_events": total_events,
-                        "attended_events": attended_events,
-                        "period": "最近3個月"
-                    })
-            
             else:  # "all"
-                # 計算所有期間
                 total_events = 0
                 attended_events = 0
                 
@@ -2745,10 +2513,8 @@ async def attendance_stats_slash(
                         "period": "所有期間"
                     })
         
-        # 按出席率排序（高到低）
         attendance_data.sort(key=lambda x: x["attendance_rate"], reverse=True)
         
-        # 統計
         total_users = len(attendance_data)
         if total_users == 0:
             embed = discord.Embed(
@@ -2761,38 +2527,29 @@ async def attendance_stats_slash(
         
         avg_attendance_rate = sum(d["attendance_rate"] for d in attendance_data) / total_users
         perfect_attendance = sum(1 for d in attendance_data if d["attendance_rate"] == 100)
-        good_attendance = sum(1 for d in attendance_data if d["attendance_rate"] >= 80)
-        poor_attendance = sum(1 for d in attendance_data if d["attendance_rate"] < 50)
         
-        # 創建分頁
         users_per_page = 15
         pages = []
         
         for i in range(0, len(attendance_data), users_per_page):
             embed = discord.Embed(
                 title=f"📊 出席率排行榜 - {attendance_data[0]['period']}",
-                description=f"顯示 {min(i + users_per_page, len(attendance_data))}/{len(attendance_data)} 位用戶\n"
-                          f"（過濾條件：至少參加過 {min_events} 次活動）",
+                description=f"顯示 {min(i + users_per_page, len(attendance_data))}/{len(attendance_data)} 位用戶",
                 color=0x3498DB
             )
             
-            # 統計資訊
             embed.add_field(
                 name="📈 統計摘要",
                 value=f"**總用戶數：** {total_users} 人\n"
                       f"**平均出席率：** {avg_attendance_rate:.1f}%\n"
-                      f"**全勤用戶：** {perfect_attendance} 人 (100%)\n"
-                      f"**良好出席：** {good_attendance} 人 (≥80%)\n"
-                      f"**出席率低：** {poor_attendance} 人 (<50%)",
+                      f"**全勤用戶：** {perfect_attendance} 人 (100%)",
                 inline=False
             )
             
-            # 排行榜
             leaderboard = ""
             for j, data in enumerate(attendance_data[i:i + users_per_page], i + 1):
                 medal = "🥇 " if j == 1 else "🥈 " if j == 2 else "🥉 " if j == 3 else f"{j}. "
                 
-                # 獲取 Discord 用戶
                 discord_user = interaction.guild.get_member(data["user_id"])
                 display_name = discord_user.display_name if discord_user else data["username"]
                 
@@ -2851,26 +2608,30 @@ async def attendance_stats_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-# 添加測試指令
-@bot.tree.command(name="test", description="測試指令是否正常")
-async def test_slash(interaction: discord.Interaction):
-    """測試指令"""
-    await interaction.response.send_message("✅ 指令測試正常！")
-
+# 額外指令: ping
 @bot.tree.command(name="ping", description="測試機器人延遲")
 async def ping_slash(interaction: discord.Interaction):
     """測試延遲"""
-    await interaction.response.send_message(f"🏓 Pong! 延遲: {round(bot.latency * 1000)}ms")
+    latency = round(bot.latency * 1000)
+    
+    embed = discord.Embed(
+        title="🏓 Pong!",
+        description=f"機器人延遲: **{latency}ms**",
+        color=discord.Color.green() if latency < 100 else discord.Color.orange() if latency < 300 else discord.Color.red()
+    )
+    
+    await interaction.response.send_message(embed=embed)
 
 # ========== 主程式 ==========
 
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - Railway 雲端版本")
+    print(f"🚀 啟動 {BOT_NAME} - 完整功能版本")
     print(f"💡 主要指令: 使用 / 前綴")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
     print(f"📁 資料庫位置: {DB_NAME}")
+    print(f"📋 總指令數: 13個")
     print(f"{'='*50}")
     
     # 從環境變數讀取 Token
