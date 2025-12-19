@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小雲ALBION機械人 - 13指令完整版本
-包含：評核活動、抽獎、積分系統、彩池管理、隨機分組
+小雲ALBION機械人 - 13指令完整版本（含出席率排行榜）
+包含：評核活動、抽獎、積分系統、彩池管理、隨機分組、出席率排行榜
 """
 
 import os
@@ -403,6 +403,67 @@ def get_current_half_month():
     else:
         return f"{year_month}-下半"
 
+def get_attendance_ranking(guild_id=0, period: str = "current", limit: int = 50):
+    """獲取出席率排行榜"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute("SELECT user_id, username, activity_stats FROM users WHERE guild_id = ?", (guild_id,))
+    results = cursor.fetchall()
+    conn.close()
+    
+    rankings = []
+    current_period = get_current_half_month()
+    
+    for user_id, username, activity_str in results:
+        if not activity_str:
+            continue
+            
+        activity_stats = json.loads(activity_str)
+        
+        if period == "current":
+            # 只計算當前半月期
+            if current_period in activity_stats:
+                data = activity_stats[current_period]
+                total = data.get("total", 0)
+                attended = data.get("attended", 0)
+                
+                if total > 0:
+                    attendance_rate = (attended / total) * 100
+                    rankings.append({
+                        'user_id': user_id,
+                        'username': username,
+                        'attendance_rate': attendance_rate,
+                        'attended': attended,
+                        'total': total,
+                        'period': current_period
+                    })
+        
+        elif period == "all":
+            # 計算所有半月期的總和
+            total_attended = 0
+            total_events = 0
+            
+            for period_key, data in activity_stats.items():
+                total_attended += data.get("attended", 0)
+                total_events += data.get("total", 0)
+            
+            if total_events > 0:
+                attendance_rate = (total_attended / total_events) * 100
+                rankings.append({
+                    'user_id': user_id,
+                    'username': username,
+                    'attendance_rate': attendance_rate,
+                    'attended': total_attended,
+                    'total': total_events,
+                    'period': "全部"
+                })
+    
+    # 按出席率降序排序
+    rankings.sort(key=lambda x: x['attendance_rate'], reverse=True)
+    
+    return rankings[:limit]
+
 async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
     """結束抽獎"""
     try:
@@ -603,7 +664,7 @@ async def sync_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
-# ========== 用戶指令 (8個) ==========
+# ========== 用戶指令 (9個) ==========
 
 @tree.command(name="help", description="顯示幫助訊息")
 async def help_slash(interaction: discord.Interaction):
@@ -615,7 +676,7 @@ async def help_slash(interaction: discord.Interaction):
     )
     
     embed.add_field(
-        name="👤 用戶指令 (8個)",
+        name="👤 用戶指令 (9個)",
         value=(
             "`/help` - 顯示此幫助訊息\n"
             "`/profile` - 查看我的數據\n"
@@ -624,19 +685,19 @@ async def help_slash(interaction: discord.Interaction):
             "`/score_transfer [用戶] [積分]` - 轉移積分給其他用戶\n"
             "`/prizelist` - 查看彩池列表\n"
             "`/random_team [人數] [組數]` - 隨機分組\n"
-            "`/score_ranking` - 查看積分排行榜"
+            "`/score_ranking` - 查看積分排行榜\n"
+            "`/attendance_ranking` - 查看出席率排行榜"
         ),
         inline=False
     )
     
     embed.add_field(
-        name="🛠️ 管理員指令 (5個)",
+        name="🛠️ 管理員指令 (4個)",
         value=(
             "`/add_prize [名稱] [類型] [數量]` - 調整彩池\n"
             "`/add_score [用戶] [積分] [原因]` - 加減積分\n"
             "`/create_event [活動名稱]` - 創建評核活動\n"
             "`/reset_scores [確認碼]` - 重置所有用戶積分\n"
-            "`/activity_stats` - 查看活動統計"
         ),
         inline=False
     )
@@ -1517,7 +1578,115 @@ async def score_ranking_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-# ========== 管理員指令 (5個) ==========
+@tree.command(name="attendance_ranking", description="查看出席率排行榜")
+@app_commands.describe(
+    period="統計期間",
+    limit="顯示人數"
+)
+async def attendance_ranking_slash(
+    interaction: discord.Interaction,
+    period: Literal["current", "all"] = "current",
+    limit: int = 20
+):
+    """出席率排行榜"""
+    await interaction.response.defer()
+    
+    try:
+        guild_id = get_guild_id(interaction)
+        log_query("attendance_ranking", interaction.user.id, {"period": period, "limit": limit}, guild_id)
+        
+        if limit < 1 or limit > 50:
+            await interaction.followup.send("❌ 顯示人數必須在 1-50 之間")
+            return
+        
+        rankings = get_attendance_ranking(guild_id, period, limit)
+        
+        if not rankings:
+            embed = discord.Embed(
+                title="📊 出席率排行榜",
+                description="目前還沒有出席率數據",
+                color=0x3498DB
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        period_text = "當前半月期" if period == "current" else "全部期間"
+        
+        embed = discord.Embed(
+            title=f"📊 出席率排行榜 - {period_text}",
+            description=f"按出席率排序（前{len(rankings)}名）",
+            color=0x3498DB
+        )
+        
+        ranking_text = ""
+        for i, rank in enumerate(rankings, 1):
+            medal = ""
+            if i == 1:
+                medal = "🥇 "
+            elif i == 2:
+                medal = "🥈 "
+            elif i == 3:
+                medal = "🥉 "
+            
+            user = bot.get_user(rank['user_id'])
+            username = user.name if user else rank['username']
+            
+            ranking_text += f"**{medal}{i}. {username}**\n"
+            ranking_text += f"   出席率：{rank['attendance_rate']:.1f}% ({rank['attended']}/{rank['total']}次)\n"
+            
+            if i % 5 == 0 and i < len(rankings):
+                ranking_text += "---\n"
+        
+        embed.add_field(name="🏆 排名", value=ranking_text, inline=False)
+        
+        # 添加統計摘要
+        total_users = len(rankings)
+        avg_attendance = sum(r['attendance_rate'] for r in rankings) / total_users if total_users > 0 else 0
+        
+        embed.add_field(
+            name="📈 統計摘要",
+            value=f"**總人數：** {total_users} 人\n"
+                  f"**平均出席率：** {avg_attendance:.1f}%\n"
+                  f"**最高出席率：** {rankings[0]['attendance_rate']:.1f}%\n"
+                  f"**最低出席率：** {rankings[-1]['attendance_rate']:.1f}%",
+            inline=False
+        )
+        
+        # 添加當前用戶的排名
+        current_user_rank = None
+        for i, rank in enumerate(rankings, 1):
+            if rank['user_id'] == interaction.user.id:
+                current_user_rank = i
+                break
+        
+        if current_user_rank:
+            user_rank = rankings[current_user_rank - 1]
+            user_rank_text = f"**你的排名：** 第 {current_user_rank} 名\n"
+            user_rank_text += f"**出席率：** {user_rank['attendance_rate']:.1f}% ({user_rank['attended']}/{user_rank['total']}次)"
+        else:
+            user_rank_text = "**你的排名：** 未上榜"
+        
+        embed.add_field(name="👤 你的表現", value=user_rank_text, inline=False)
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if period == "current":
+            period_info = f"半月期：{rankings[0]['period'] if rankings else get_current_half_month()}"
+        else:
+            period_info = "統計期間：全部歷史記錄"
+        
+        embed.set_footer(text=f"{period_info} | 更新時間：{current_time}")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 讀取出席率排行榜失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
+
+# ========== 管理員指令 (4個) ==========
 
 @tree.command(name="add_prize", description="添加獎品到彩池")
 @app_commands.describe(
@@ -1973,99 +2142,6 @@ async def reset_scores_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
-
-@tree.command(name="activity_stats", description="查看活動統計數據")
-async def activity_stats_slash(interaction: discord.Interaction):
-    """活動統計"""
-    await interaction.response.defer()
-    
-    try:
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.followup.send("❌ 需要管理員權限")
-            return
-        
-        guild_id = get_guild_id(interaction)
-        log_query("activity_stats", interaction.user.id, {"action": "view_stats"}, guild_id)
-        
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        
-        # 獲取活動統計
-        cursor.execute("SELECT COUNT(*) FROM evaluation_events WHERE guild_id = ?", (guild_id,))
-        total_events = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM evaluation_events WHERE guild_id = ? AND is_active = 1", (guild_id,))
-        active_events = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM giveaways WHERE guild_id = ?", (guild_id,))
-        total_giveaways = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM giveaways WHERE guild_id = ? AND is_active = 1", (guild_id,))
-        active_giveaways = cursor.fetchone()[0]
-        
-        # 獲取用戶統計
-        cursor.execute("SELECT COUNT(*) FROM users WHERE guild_id = ?", (guild_id,))
-        total_users = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT SUM(current_score), SUM(total_score) FROM users WHERE guild_id = ?", (guild_id,))
-        score_result = cursor.fetchone()
-        total_current_score = score_result[0] or 0
-        total_earned_score = score_result[1] or 0
-        
-        # 獲取最近活動
-        cursor.execute("""
-            SELECT event_name, COUNT(*) as participant_count, start_time 
-            FROM evaluation_events 
-            WHERE guild_id = ? 
-            GROUP BY event_name 
-            ORDER BY start_time DESC 
-            LIMIT 5
-        """, (guild_id,))
-        recent_events = cursor.fetchall()
-        
-        conn.close()
-        
-        embed = discord.Embed(
-            title="📊 活動統計數據",
-            description=f"伺服器：{interaction.guild.name if interaction.guild else 'DM'}",
-            color=0x7289DA
-        )
-        
-        embed.add_field(name="🎮 評核活動", value=f"總數：{total_events}\n進行中：{active_events}", inline=True)
-        embed.add_field(name="🎉 抽獎活動", value=f"總數：{total_giveaways}\n進行中：{active_giveaways}", inline=True)
-        embed.add_field(name="👥 用戶統計", value=f"總用戶數：{total_users}\n總積分：{total_current_score}", inline=True)
-        
-        embed.add_field(
-            name="💰 積分統計",
-            value=f"**當前總積分：** {total_current_score:,}分\n"
-                  f"**歷史總獲得：** {total_earned_score:,}分\n"
-                  f"**平均每人：** {total_current_score//total_users if total_users>0 else 0}分",
-            inline=False
-        )
-        
-        if recent_events:
-            events_text = ""
-            for event_name, participant_count, start_time in recent_events:
-                try:
-                    time_str = datetime.strptime(start_time.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%m/%d %H:%M')
-                except:
-                    time_str = start_time
-                events_text += f"• **{event_name}**\n  👥 {participant_count}人 | 📅 {time_str}\n"
-            
-            embed.add_field(name="📅 最近活動", value=events_text, inline=False)
-        
-        current_period = get_current_half_month()
-        embed.set_footer(text=f"統計時間: {datetime.now().strftime('%Y-%m-%d %H:%M')} | 當前半月期: {current_period}")
-        
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        error_embed = discord.Embed(
-            title="❌ 讀取統計失敗",
-            description=f"錯誤：{str(e)}",
-            color=0xFF0000
-        )
-        await interaction.followup.send(embed=error_embed)
 
 # ========== 事件處理 ==========
 
@@ -2546,11 +2622,11 @@ async def on_raw_reaction_add(payload):
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - 13指令完整版本")
+    print(f"🚀 啟動 {BOT_NAME} - 13指令完整版本（含出席率排行榜）")
     print(f"💡 主要指令: 使用 / 前綴")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
     print(f"📁 資料庫位置: {DB_NAME}")
-    print(f"📊 指令數量: 13個 (8用戶 + 5管理員)")
+    print(f"📊 指令數量: 13個 (9用戶 + 4管理員)")
     print(f"{'='*50}")
     
     token = os.getenv("DISCORD_TOKEN")
