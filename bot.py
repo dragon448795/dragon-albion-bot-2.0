@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小雲ALBION機械人 - 13指令完整版本（含分頁出席率排行榜）
-已移除 reset_scores 指令，新增分頁功能
-修復簽到人數限制問題
+小雲ALBION機械人 - PostgreSQL完整版本（數據持久化）
+包含所有13個原指令 + 新增/blessing指令 + 聊天積分系統
+修復獎品增減功能，使用Railway PostgreSQL
 """
 
 import os
@@ -16,9 +16,12 @@ import json
 import random
 from datetime import datetime, timedelta
 from typing import Optional, List, Literal
-import sqlite3
 import time
-import aiosqlite  # 使用異步SQLite
+import asyncpg  # PostgreSQL
+from dotenv import load_dotenv
+
+# 載入環境變數
+load_dotenv()
 
 # ========== 設定 ==========
 BOT_NAME = "小雲機械人"
@@ -48,6 +51,8 @@ SCORE_DRAW_EMOJIS = ["🟢", "🔵", "🟣"]
 
 # ========== 積分設定 ==========
 SIGNUP_SCORE = 40  # 簽到積分
+CHAT_SCORE = 5     # 每句話積分
+DAILY_CHAT_LIMIT = 20  # 每日聊天積分上限
 PROFESSION_BONUS = {
     "坦克": 0,
     "输出": 0,
@@ -77,310 +82,438 @@ bot = commands.Bot(
 
 tree = bot.tree
 
-# ========== 資料庫設定 ==========
-DB_NAME = "bot_data.db"
+# ========== PostgreSQL 連接池 ==========
+class Database:
+    def __init__(self):
+        self.pool = None
+    
+    async def connect(self):
+        """連接 PostgreSQL 資料庫"""
+        try:
+            # Railway 會自動提供 DATABASE_URL 環境變數
+            database_url = os.getenv('DATABASE_URL')
+            
+            if not database_url:
+                print("⚠️ 找不到 DATABASE_URL，將無法保存數據！")
+                return False
+            
+            # 修正URL格式
+            if database_url.startswith('postgres://'):
+                database_url = database_url.replace('postgres://', 'postgresql://', 1)
+            
+            print(f"🔄 正在連接 PostgreSQL...")
+            self.pool = await asyncpg.create_pool(
+                database_url, 
+                min_size=5, 
+                max_size=20,
+                command_timeout=60
+            )
+            
+            await self.init_db()
+            print("✅ PostgreSQL 連接成功")
+            return True
+            
+        except Exception as e:
+            print(f"❌ PostgreSQL 連接失敗: {e}")
+            return False
+    
+    async def init_db(self):
+        """初始化資料庫表格"""
+        async with self.pool.acquire() as conn:
+            # users 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id BIGINT NOT NULL,
+                    guild_id BIGINT NOT NULL,
+                    username TEXT,
+                    current_score INTEGER DEFAULT 0,
+                    total_score INTEGER DEFAULT 0,
+                    join_date TIMESTAMP DEFAULT NOW(),
+                    last_active TIMESTAMP DEFAULT NOW(),
+                    last_chat_date DATE,
+                    daily_chat_score INTEGER DEFAULT 0,
+                    profession_counts JSONB DEFAULT '{}',
+                    activity_stats JSONB DEFAULT '{}',
+                    rating_stats JSONB DEFAULT '{}',
+                    PRIMARY KEY (user_id, guild_id)
+                )
+            ''')
+            
+            # prize_pool 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS prize_pool (
+                    id SERIAL PRIMARY KEY,
+                    prize_name TEXT NOT NULL,
+                    box_level TEXT NOT NULL,
+                    quantity INTEGER DEFAULT 1,
+                    remaining INTEGER DEFAULT 1,
+                    added_by BIGINT,
+                    added_at TIMESTAMP DEFAULT NOW(),
+                    guild_id BIGINT DEFAULT 0,
+                    UNIQUE(prize_name, box_level, guild_id)
+                )
+            ''')
+            
+            # giveaways 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS giveaways (
+                    id SERIAL PRIMARY KEY,
+                    creator_id BIGINT,
+                    prize TEXT,
+                    winner_count INTEGER DEFAULT 1,
+                    participants JSONB DEFAULT '[]',
+                    winners JSONB DEFAULT '[]',
+                    end_time TIMESTAMP,
+                    message_id BIGINT,
+                    channel_id BIGINT,
+                    is_active BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    guild_id BIGINT DEFAULT 0
+                )
+            ''')
+            
+            # score_draws 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS score_draws (
+                    id SERIAL PRIMARY KEY,
+                    creator_id BIGINT,
+                    score_cost INTEGER,
+                    box_level TEXT,
+                    participants JSONB DEFAULT '[]',
+                    winner_prize TEXT,
+                    winner_id BIGINT,
+                    is_active BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    guild_id BIGINT DEFAULT 0
+                )
+            ''')
+            
+            # score_transfers 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS score_transfers (
+                    id SERIAL PRIMARY KEY,
+                    from_user_id BIGINT,
+                    to_user_id BIGINT,
+                    amount INTEGER,
+                    reason TEXT,
+                    timestamp TIMESTAMP DEFAULT NOW(),
+                    guild_id BIGINT DEFAULT 0
+                )
+            ''')
+            
+            # evaluation_events 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS evaluation_events (
+                    id SERIAL PRIMARY KEY,
+                    event_name TEXT,
+                    creator_id BIGINT,
+                    signup_message_id BIGINT,
+                    profession_message_id BIGINT,
+                    rating_message_id BIGINT,
+                    channel_id BIGINT,
+                    participants JSONB DEFAULT '[]',
+                    default_rated JSONB DEFAULT '[]',
+                    professions JSONB DEFAULT '{}',
+                    ratings JSONB DEFAULT '{}',
+                    is_active BOOLEAN DEFAULT true,
+                    start_time TIMESTAMP DEFAULT NOW(),
+                    signup_end_time TIMESTAMP,
+                    guild_id BIGINT DEFAULT 0
+                )
+            ''')
+            
+            # query_logs 表格
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS query_logs (
+                    id SERIAL PRIMARY KEY,
+                    query_type TEXT,
+                    user_id BIGINT,
+                    parameters JSONB,
+                    timestamp TIMESTAMP DEFAULT NOW(),
+                    guild_id BIGINT DEFAULT 0
+                )
+            ''')
+            
+            print("✅ 資料庫表格初始化完成")
+    
+    async def execute(self, query, *args):
+        """執行 SQL 查詢"""
+        async with self.pool.acquire() as conn:
+            return await conn.execute(query, *args)
+    
+    async def fetch(self, query, *args):
+        """執行查詢並返回結果"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetch(query, *args)
+    
+    async def fetchrow(self, query, *args):
+        """執行查詢並返回單行結果"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchrow(query, *args)
+    
+    async def fetchval(self, query, *args):
+        """執行查詢並返回單個值"""
+        async with self.pool.acquire() as conn:
+            return await conn.fetchval(query, *args)
 
-async def init_db():
-    """初始化資料庫"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER NOT NULL,
-            guild_id INTEGER NOT NULL,
-            username TEXT,
-            total_score INTEGER DEFAULT 0,
-            current_score INTEGER DEFAULT 0,
-            join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            profession_counts TEXT DEFAULT '{}',
-            activity_stats TEXT DEFAULT '{}',
-            rating_stats TEXT DEFAULT '{}',
-            PRIMARY KEY (user_id, guild_id)
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS prize_pool (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            prize_name TEXT NOT NULL,
-            box_level TEXT NOT NULL,
-            quantity INTEGER DEFAULT 1,
-            remaining INTEGER DEFAULT 1,
-            added_by INTEGER,
-            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            guild_id INTEGER DEFAULT 0,
-            UNIQUE(prize_name, box_level, guild_id)
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS giveaways (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER,
-            prize TEXT,
-            winner_count INTEGER DEFAULT 1,
-            participants TEXT DEFAULT '[]',
-            winners TEXT DEFAULT '[]',
-            end_time TIMESTAMP,
-            message_id INTEGER,
-            channel_id INTEGER,
-            is_active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            guild_id INTEGER DEFAULT 0
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS score_draws (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            creator_id INTEGER,
-            score_cost INTEGER,
-            box_level TEXT,
-            participants TEXT DEFAULT '[]',
-            winner_prize TEXT,
-            winner_id INTEGER,
-            is_active BOOLEAN DEFAULT 1,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            guild_id INTEGER DEFAULT 0
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS score_transfers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            from_user_id INTEGER,
-            to_user_id INTEGER,
-            amount INTEGER,
-            reason TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            guild_id INTEGER DEFAULT 0
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS evaluation_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_name TEXT,
-            creator_id INTEGER,
-            signup_message_id INTEGER,
-            profession_message_id INTEGER,
-            rating_message_id INTEGER,
-            channel_id INTEGER,
-            participants TEXT DEFAULT '[]',
-            default_rated TEXT DEFAULT '[]',   --已預設評級的用戶
-            professions TEXT DEFAULT '{}',
-            ratings TEXT DEFAULT '{}',
-            is_active BOOLEAN DEFAULT 1,
-            start_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            signup_end_time TIMESTAMP,
-            guild_id INTEGER DEFAULT 0
-        )
-        ''')
-        
-        await conn.execute('''
-        CREATE TABLE IF NOT EXISTS query_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            query_type TEXT,
-            user_id INTEGER,
-            parameters TEXT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            guild_id INTEGER DEFAULT 0
-        )
-        ''')
-        
-        await conn.commit()
-        print("✅ 資料庫初始化完成")
-
-async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0):
-    """記錄查詢日誌"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        await conn.execute(
-            "INSERT INTO query_logs (query_type, user_id, parameters, guild_id) VALUES (?, ?, ?, ?)",
-            (query_type, user_id, json.dumps(parameters), guild_id)
-        )
-        await conn.commit()
+db = Database()
 
 # ========== 通用函數 ==========
 
+def get_guild_id(interaction_or_context):
+    """獲取伺服器ID"""
+    if hasattr(interaction_or_context, 'guild'):
+        return interaction_or_context.guild.id if interaction_or_context.guild else 0
+    elif hasattr(interaction_or_context, 'message'):
+        return interaction_or_context.message.guild.id if interaction_or_context.message.guild else 0
+    return 0
+
 async def get_user_score(user_id, guild_id=0):
     """取得用戶積分"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        async with conn.execute("SELECT current_score, total_score FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-            result = await cursor.fetchone()
-            
-            if result:
-                return result[0], result[1]
-            return 0, 0
+    result = await db.fetchrow(
+        "SELECT current_score, total_score FROM users WHERE user_id = $1 AND guild_id = $2",
+        user_id, guild_id
+    )
+    
+    if result:
+        return result['current_score'], result['total_score']
+    return 0, 0
 
 async def update_user_score(user_id, username, amount, reason="", guild_id=0):
     """更新用戶積分"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            # 先檢查用戶是否已存在
-            async with conn.execute("SELECT user_id FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-                existing_user = await cursor.fetchone()
-            
-            if not existing_user:
-                # 用戶不存在，插入新用戶
-                current_score = max(amount, 0)
-                total_score = max(amount, 0)
-                await conn.execute(
-                    "INSERT OR IGNORE INTO users (user_id, username, current_score, total_score, guild_id) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, username, current_score, total_score, guild_id)
+        # 先檢查用戶是否已存在
+        existing = await db.fetchrow(
+            "SELECT user_id FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        
+        if not existing:
+            # 用戶不存在，插入新用戶
+            current_score = max(amount, 0)
+            total_score = max(amount, 0)
+            await db.execute(
+                "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                user_id, username, current_score, total_score, guild_id
+            )
+        else:
+            # 用戶存在，更新積分
+            if amount > 0:
+                await db.execute(
+                    "UPDATE users SET current_score = current_score + $1, total_score = total_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
+                    amount, user_id, guild_id
                 )
             else:
-                # 用戶存在，更新積分
-                if amount > 0:
-                    await conn.execute(
-                        "UPDATE users SET current_score = current_score + ?, total_score = total_score + ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ? AND guild_id = ?",
-                        (amount, amount, user_id, guild_id)
-                    )
-                else:
-                    await conn.execute(
-                        "UPDATE users SET current_score = current_score + ?, last_active = CURRENT_TIMESTAMP WHERE user_id = ? AND guild_id = ?",
-                        (amount, user_id, guild_id)
-                    )
-            
-            # 記錄積分變動
-            if amount != 0:
-                from_user_id = user_id if amount < 0 else None
-                to_user_id = user_id if amount > 0 else None
-                reason_text = reason if reason else ("系統扣除" if amount < 0 else "系統增加")
-                await conn.execute(
-                    "INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id) VALUES (?, ?, ?, ?, ?)",
-                    (from_user_id, to_user_id, abs(amount), reason_text, guild_id)
+                await db.execute(
+                    "UPDATE users SET current_score = current_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
+                    amount, user_id, guild_id
                 )
+        
+        # 記錄積分變動
+        if amount != 0:
+            from_user_id = user_id if amount < 0 else None
+            to_user_id = user_id if amount > 0 else None
+            reason_text = reason if reason else ("系統扣除" if amount < 0 else "系統增加")
             
-            await conn.commit()
+            await db.execute(
+                "INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                from_user_id, to_user_id, abs(amount), reason_text, guild_id
+            )
             
     except Exception as e:
         print(f"更新用戶積分錯誤: {e}")
 
+async def add_chat_score(user_id, username, guild_id=0):
+    """添加聊天積分"""
+    try:
+        today = datetime.now().date()
+        
+        # 檢查用戶記錄
+        result = await db.fetchrow(
+            "SELECT last_chat_date, daily_chat_score FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        
+        if not result:
+            # 新用戶，創建記錄
+            await db.execute(
+                "INSERT INTO users (user_id, username, last_chat_date, daily_chat_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                user_id, username, today, CHAT_SCORE, guild_id
+            )
+            await update_user_score(user_id, username, CHAT_SCORE, "聊天積分", guild_id)
+            return CHAT_SCORE, DAILY_CHAT_LIMIT
+            
+        else:
+            last_chat_date = result['last_chat_date']
+            daily_chat_score = result['daily_chat_score'] or 0
+            
+            # 如果是新的一天，重置計數
+            if last_chat_date != today:
+                daily_chat_score = CHAT_SCORE
+                await db.execute(
+                    "UPDATE users SET last_chat_date = $1, daily_chat_score = $2 WHERE user_id = $3 AND guild_id = $4",
+                    today, daily_chat_score, user_id, guild_id
+                )
+                await update_user_score(user_id, username, CHAT_SCORE, "聊天積分", guild_id)
+                return CHAT_SCORE, DAILY_CHAT_LIMIT
+            else:
+                # 檢查是否已達上限
+                if daily_chat_score >= DAILY_CHAT_LIMIT:
+                    return 0, DAILY_CHAT_LIMIT
+                
+                # 添加積分
+                new_score = min(daily_chat_score + CHAT_SCORE, DAILY_CHAT_LIMIT)
+                added_score = new_score - daily_chat_score
+                
+                await db.execute(
+                    "UPDATE users SET daily_chat_score = $1 WHERE user_id = $2 AND guild_id = $3",
+                    new_score, user_id, guild_id
+                )
+                
+                if added_score > 0:
+                    await update_user_score(user_id, username, added_score, "聊天積分", guild_id)
+                
+                return added_score, DAILY_CHAT_LIMIT
+                
+    except Exception as e:
+        print(f"添加聊天積分錯誤: {e}")
+        return 0, DAILY_CHAT_LIMIT
+
 async def get_user_profile(user_id, guild_id=0):
     """獲取用戶完整資料"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        async with conn.execute("SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-            result = await cursor.fetchone()
-            
-            if result:
-                current_score, total_score, join_date, profession_str, activity_str, rating_str = result
-                
-                try:
-                    join_date_str = datetime.strptime(join_date.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')
-                except:
-                    join_date_str = join_date
-                
-                profession_counts = json.loads(profession_str) if profession_str else {}
-                activity_stats = json.loads(activity_str) if activity_str else {}
-                rating_stats = json.loads(rating_str) if rating_str else {}
-                
-                return {
-                    'user_id': user_id,
-                    'current_score': current_score,
-                    'total_score': total_score,
-                    'join_date': join_date_str,
-                    'profession_counts': profession_counts,
-                    'activity_stats': activity_stats,
-                    'rating_stats': rating_stats
-                }
-            
-            return None
+    result = await db.fetchrow(
+        "SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
+        user_id, guild_id
+    )
+    
+    if result:
+        current_score = result['current_score']
+        total_score = result['total_score']
+        join_date = result['join_date']
+        profession_counts = result['profession_counts'] or {}
+        activity_stats = result['activity_stats'] or {}
+        rating_stats = result['rating_stats'] or {}
+        
+        try:
+            if isinstance(join_date, str):
+                join_date_str = datetime.strptime(join_date.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')
+            else:
+                join_date_str = join_date.strftime('%Y-%m-%d')
+        except:
+            join_date_str = str(join_date)
+        
+        return {
+            'user_id': user_id,
+            'current_score': current_score,
+            'total_score': total_score,
+            'join_date': join_date_str,
+            'profession_counts': profession_counts,
+            'activity_stats': activity_stats,
+            'rating_stats': rating_stats
+        }
+    
+    return None
 
 async def update_user_profession(user_id, profession, guild_id=0):
     """更新用戶職業統計"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("SELECT profession_counts, username FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
+        result = await db.fetchrow(
+            "SELECT profession_counts, username FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        
+        if result:
+            profession_counts = result['profession_counts'] or {}
+            username = result['username']
             
-            if result:
-                profession_str = result[0]
-                username = result[1]
-                profession_counts = json.loads(profession_str) if profession_str else {}
-                
-                if profession in profession_counts:
-                    profession_counts[profession] += 1
-                else:
-                    profession_counts[profession] = 1
-                
-                bonus_score = PROFESSION_BONUS.get(profession, 0)
-                if bonus_score > 0:
-                    await update_user_score(user_id, username, bonus_score, f"職業加成: {profession}", guild_id)
-                
-                await conn.execute("UPDATE users SET profession_counts = ? WHERE user_id = ? AND guild_id = ?", 
-                                  (json.dumps(profession_counts), user_id, guild_id))
-                
-                await conn.commit()
-                
+            profession_str = profession
+            if profession_str in profession_counts:
+                profession_counts[profession_str] += 1
+            else:
+                profession_counts[profession_str] = 1
+            
+            bonus_score = PROFESSION_BONUS.get(profession, 0)
+            if bonus_score > 0:
+                await update_user_score(user_id, username, bonus_score, f"職業加成: {profession}", guild_id)
+            
+            await db.execute(
+                "UPDATE users SET profession_counts = $1 WHERE user_id = $2 AND guild_id = $3",
+                profession_counts, user_id, guild_id
+            )
+            
     except Exception as e:
         print(f"更新職業統計錯誤: {e}")
 
 async def update_user_activity(user_id, event_name, attended=True, guild_id=0):
     """更新用戶活動統計"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("SELECT activity_stats FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
+        result = await db.fetchrow(
+            "SELECT activity_stats FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        
+        if result:
+            activity_stats = result['activity_stats'] or {}
             
-            if result:
-                activity_str = result[0]
-                activity_stats = json.loads(activity_str) if activity_str else {}
-                
-                # 獲取當前半月期
-                now = datetime.now()
-                year_month = now.strftime("%Y-%m")
-                day = now.day
-                current_period = f"{year_month}-上半" if day <= 15 else f"{year_month}-下半"
-                
-                if current_period not in activity_stats:
-                    activity_stats[current_period] = {"total": 0, "attended": 0}
-                
-                activity_stats[current_period]["total"] += 1
-                if attended:
-                    activity_stats[current_period]["attended"] += 1
-                
-                await conn.execute("UPDATE users SET activity_stats = ? WHERE user_id = ? AND guild_id = ?", 
-                                  (json.dumps(activity_stats), user_id, guild_id))
-                
-                await conn.commit()
-                
+            # 獲取當前半月期
+            now = datetime.now()
+            year_month = now.strftime("%Y-%m")
+            day = now.day
+            current_period = f"{year_month}-上半" if day <= 15 else f"{year_month}-下半"
+            
+            if current_period not in activity_stats:
+                activity_stats[current_period] = {"total": 0, "attended": 0}
+            
+            activity_stats[current_period]["total"] += 1
+            if attended:
+                activity_stats[current_period]["attended"] += 1
+            
+            await db.execute(
+                "UPDATE users SET activity_stats = $1 WHERE user_id = $2 AND guild_id = $3",
+                activity_stats, user_id, guild_id
+            )
+            
     except Exception as e:
         print(f"更新活動統計錯誤: {e}")
 
 async def update_user_rating(user_id, rating_type, guild_id=0):
     """更新用戶評核統計"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("SELECT rating_stats FROM users WHERE user_id = ? AND guild_id = ?", (user_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
+        result = await db.fetchrow(
+            "SELECT rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
+        
+        if result:
+            rating_stats = result['rating_stats'] or {}
             
-            if result:
-                rating_str = result[0]
-                rating_stats = json.loads(rating_str) if rating_str else {}
-                
-                if rating_type in rating_stats:
-                    rating_stats[rating_type] += 1
-                else:
-                    rating_stats[rating_type] = 1
-                
-                score = RATING_SCORES.get(rating_type, 0)
-                
-                if score != 0:
-                    await conn.execute("""
-                        UPDATE users 
-                        SET current_score = current_score + ?, 
-                            total_score = CASE 
-                                            WHEN total_score + ? > 0 THEN total_score + ?
-                                            ELSE 0
-                                          END
-                        WHERE user_id = ? AND guild_id = ?
-                    """, (score, score, score, user_id, guild_id))
-                
-                await conn.execute("UPDATE users SET rating_stats = ? WHERE user_id = ? AND guild_id = ?", 
-                                  (json.dumps(rating_stats), user_id, guild_id))
-                
-                await conn.commit()
-                
+            rating_str = rating_type
+            if rating_str in rating_stats:
+                rating_stats[rating_str] += 1
+            else:
+                rating_stats[rating_str] = 1
+            
+            score = RATING_SCORES.get(rating_type, 0)
+            
+            if score != 0:
+                await db.execute(
+                    """
+                    UPDATE users 
+                    SET current_score = current_score + $1, 
+                        total_score = CASE 
+                                        WHEN total_score + $1 > 0 THEN total_score + $1
+                                        ELSE 0
+                                      END
+                    WHERE user_id = $2 AND guild_id = $3
+                    """,
+                    score, user_id, guild_id
+                )
+            
+            await db.execute(
+                "UPDATE users SET rating_stats = $1 WHERE user_id = $2 AND guild_id = $3",
+                rating_stats, user_id, guild_id
+            )
+            
     except Exception as e:
         print(f"更新評核統計錯誤: {e}")
 
@@ -397,36 +530,36 @@ def get_current_half_month():
 
 async def get_total_events_in_period(guild_id=0, period: str = "current"):
     """獲取指定期間內的總活動數"""
-    async with aiosqlite.connect(DB_NAME) as conn:
-        if period == "current":
-            # 計算當前半月期內的總活動數
-            current_period = get_current_half_month()
-            
-            # 獲取所有用戶的活動統計
-            async with conn.execute("SELECT activity_stats FROM users WHERE guild_id = ?", (guild_id,)) as cursor:
-                results = await cursor.fetchall()
-            
-            total_events_in_period = 0
-            
-            for activity_str, in results:
-                if not activity_str:
-                    continue
-                    
-                activity_stats = json.loads(activity_str)
-                if current_period in activity_stats:
-                    user_total = activity_stats[current_period].get("total", 0)
-                    if user_total > total_events_in_period:
-                        total_events_in_period = user_total
-            
-            return total_events_in_period
-            
-        else:  # all
-            # 計算所有活動的總數
-            async with conn.execute("SELECT COUNT(*) FROM evaluation_events WHERE guild_id = ?", (guild_id,)) as cursor:
-                result = await cursor.fetchone()
-                total_events = result[0] if result else 0
-            
-            return total_events
+    if period == "current":
+        # 計算當前半月期內的總活動數
+        current_period = get_current_half_month()
+        
+        # 獲取所有用戶的活動統計
+        results = await db.fetch(
+            "SELECT activity_stats FROM users WHERE guild_id = $1",
+            guild_id
+        )
+        
+        total_events_in_period = 0
+        
+        for row in results:
+            activity_stats = row['activity_stats'] or {}
+            if current_period in activity_stats:
+                user_total = activity_stats[current_period].get("total", 0)
+                if user_total > total_events_in_period:
+                    total_events_in_period = user_total
+        
+        return total_events_in_period
+        
+    else:  # all
+        # 計算所有活動的總數
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM evaluation_events WHERE guild_id = $1",
+            guild_id
+        )
+        total_events = result['count'] if result else 0
+        
+        return total_events
 
 async def get_all_attendance_data(guild_id=0, period: str = "current"):
     """獲取所有用戶的出席數據"""
@@ -436,30 +569,30 @@ async def get_all_attendance_data(guild_id=0, period: str = "current"):
     if total_events == 0:
         return []
     
-    async with aiosqlite.connect(DB_NAME) as conn:
-        # 獲取所有用戶
-        async with conn.execute("SELECT user_id, username, activity_stats FROM users WHERE guild_id = ?", (guild_id,)) as cursor:
-            results = await cursor.fetchall()
+    # 獲取所有用戶
+    results = await db.fetch(
+        "SELECT user_id, username, activity_stats FROM users WHERE guild_id = $1",
+        guild_id
+    )
     
     rankings = []
     current_period = get_current_half_month()
     
-    for user_id, username, activity_str in results:
-        if not activity_str:
-            attended_count = 0
-        else:
-            activity_stats = json.loads(activity_str)
-            
-            if period == "current":
-                if current_period in activity_stats:
-                    data = activity_stats[current_period]
-                    attended_count = data.get("attended", 0)
-                else:
-                    attended_count = 0
+    for row in results:
+        user_id = row['user_id']
+        username = row['username']
+        activity_stats = row['activity_stats'] or {}
+        
+        if period == "current":
+            if current_period in activity_stats:
+                data = activity_stats[current_period]
+                attended_count = data.get("attended", 0)
             else:
                 attended_count = 0
-                for period_key, data in activity_stats.items():
-                    attended_count += data.get("attended", 0)
+        else:
+            attended_count = 0
+            for period_key, data in activity_stats.items():
+                attended_count += data.get("attended", 0)
         
         attendance_rate = (attended_count / total_events) * 100 if total_events > 0 else 0
         
@@ -478,100 +611,109 @@ async def get_all_attendance_data(guild_id=0, period: str = "current"):
 async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
     """結束抽獎"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("""
-                SELECT id, creator_id, prize, winner_count, participants, winners, channel_id 
-                FROM giveaways 
-                WHERE message_id = ? AND is_active = 1 AND guild_id = ?
-            """, (message_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
-            
-            if not result:
-                return
-            
-            giveaway_id, creator_id, prize, winner_count, participants_json, winners_json, channel_id = result
-            
-            participants = json.loads(participants_json) if participants_json else []
-            channel = bot.get_channel(channel_id)
-            
-            if not channel:
-                return
-            
-            try:
-                message = await channel.fetch_message(message_id)
-            except:
-                return
-            
-            if participants:
-                if len(participants) <= winner_count:
-                    winners_list = participants
-                else:
-                    winners_list = random.sample(participants, winner_count)
-                
-                await conn.execute("UPDATE giveaways SET winners = ?, is_active = 0 WHERE id = ?", 
-                                 (json.dumps(winners_list), giveaway_id))
-                await conn.commit()
-                
-                new_embed = discord.Embed(
-                    title="🎉 抽獎已結束 🎉",
-                    description="開獎完成！",
-                    color=0x00FF00
-                )
-                
-                new_embed.add_field(name="🎁 獎品", value=prize, inline=True)
-                new_embed.add_field(name="👑 中獎人數", value=str(len(winners_list)), inline=True)
-                new_embed.add_field(name="🎫 參與人數", value=f"{len(participants)} 人", inline=True)
-                
-                winners_text = ""
-                for i, winner_id in enumerate(winners_list[:5], 1):
-                    winners_text += f"{i}. <@{winner_id}>\n"
-                
-                if len(winners_list) > 5:
-                    winners_text += f"... 還有 {len(winners_list) - 5} 人"
-                
-                if winners_text:
-                    new_embed.add_field(name="🏆 獲獎者", value=winners_text, inline=False)
-                
-                await message.edit(embed=new_embed)
-                await message.clear_reactions()
-                
-                for winner_id in winners_list:
-                    await channel.send(f"🎉 恭喜 <@{winner_id}> 獲得了 **{prize}**！")
+        result = await db.fetchrow(
+            """
+            SELECT id, creator_id, prize, winner_count, participants, winners, channel_id 
+            FROM giveaways 
+            WHERE message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            message_id, guild_id
+        )
+        
+        if not result:
+            return
+        
+        giveaway_id = result['id']
+        creator_id = result['creator_id']
+        prize = result['prize']
+        winner_count = result['winner_count']
+        participants = result['participants'] or []
+        winners = result['winners'] or []
+        channel_id = result['channel_id']
+        
+        channel = bot.get_channel(channel_id)
+        
+        if not channel:
+            return
+        
+        try:
+            message = await channel.fetch_message(message_id)
+        except:
+            return
+        
+        if participants:
+            if len(participants) <= winner_count:
+                winners_list = participants
             else:
-                new_embed = discord.Embed(
-                    title="🎉 抽獎已結束",
-                    description="無人參與抽獎" + ("（手動結束）" if manual else ""),
-                    color=0xFF0000
-                )
-                await message.edit(embed=new_embed)
-                await message.clear_reactions()
+                winners_list = random.sample(participants, winner_count)
             
+            await db.execute(
+                "UPDATE giveaways SET winners = $1, is_active = false WHERE id = $2",
+                winners_list, giveaway_id
+            )
+            
+            new_embed = discord.Embed(
+                title="🎉 抽獎已結束 🎉",
+                description="開獎完成！",
+                color=0x00FF00
+            )
+            
+            new_embed.add_field(name="🎁 獎品", value=prize, inline=True)
+            new_embed.add_field(name="👑 中獎人數", value=str(len(winners_list)), inline=True)
+            new_embed.add_field(name="🎫 參與人數", value=f"{len(participants)} 人", inline=True)
+            
+            winners_text = ""
+            for i, winner_id in enumerate(winners_list[:5], 1):
+                winners_text += f"{i}. <@{winner_id}>\n"
+            
+            if len(winners_list) > 5:
+                winners_text += f"... 還有 {len(winners_list) - 5} 人"
+            
+            if winners_text:
+                new_embed.add_field(name="🏆 獲獎者", value=winners_text, inline=False)
+            
+            await message.edit(embed=new_embed)
+            await message.clear_reactions()
+            
+            for winner_id in winners_list:
+                await channel.send(f"🎉 恭喜 <@{winner_id}> 獲得了 **{prize}**！")
+        else:
+            new_embed = discord.Embed(
+                title="🎉 抽獎已結束",
+                description="無人參與抽獎" + ("（手動結束）" if manual else ""),
+                color=0xFF0000
+            )
+            await message.edit(embed=new_embed)
+            await message.clear_reactions()
+        
     except Exception as e:
         print(f"結束抽獎錯誤: {e}")
 
 async def end_evaluation(event_id, channel, event_name, guild_id=0):
     """結束評核活動"""
     try:
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("""
-                SELECT participants, professions, ratings, rating_message_id 
-                FROM evaluation_events 
-                WHERE id = ? AND guild_id = ?
-            """, (event_id, guild_id)) as cursor:
-                result = await cursor.fetchone()
-            
-            if not result:
-                return
-            
-            participants_json, professions_json, ratings_json, rating_message_id = result
-            
-            participants = json.loads(participants_json) if participants_json else []
-            professions = json.loads(professions_json) if professions_json else {}
-            ratings = json.loads(ratings_json) if ratings_json else {}
-            
-            await conn.execute("UPDATE evaluation_events SET is_active = 0 WHERE id = ?", (event_id,))
-            await conn.commit()
+        result = await db.fetchrow(
+            """
+            SELECT participants, professions, ratings, rating_message_id 
+            FROM evaluation_events 
+            WHERE id = $1 AND guild_id = $2
+            """,
+            event_id, guild_id
+        )
         
+        if not result:
+            return
+        
+        participants = result['participants'] or []
+        professions = result['professions'] or {}
+        ratings = result['ratings'] or {}
+        rating_message_id = result['rating_message_id']
+        
+        await db.execute(
+            "UPDATE evaluation_events SET is_active = false WHERE id = $1",
+            event_id
+        )
+    
         try:
             rating_message = await channel.fetch_message(rating_message_id)
             await rating_message.clear_reactions()
@@ -622,13 +764,15 @@ async def end_evaluation(event_id, channel, event_name, guild_id=0):
     except Exception as e:
         print(f"結束評核活動錯誤: {e}")
 
-def get_guild_id(interaction_or_context):
-    """獲取伺服器ID"""
-    if hasattr(interaction_or_context, 'guild'):
-        return interaction_or_context.guild.id if interaction_or_context.guild else 0
-    elif hasattr(interaction_or_context, 'message'):
-        return interaction_or_context.message.guild.id if interaction_or_context.message.guild else 0
-    return 0
+async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0):
+    """記錄查詢日誌"""
+    try:
+        await db.execute(
+            "INSERT INTO query_logs (query_type, user_id, parameters, guild_id) VALUES ($1, $2, $3, $4)",
+            query_type, user_id, json.dumps(parameters), guild_id
+        )
+    except Exception as e:
+        print(f"記錄查詢日誌錯誤: {e}")
 
 # ========== 同步指令 ==========
 
@@ -664,7 +808,7 @@ async def sync_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
-# ========== 用戶指令 (9個) ==========
+# ========== 用戶指令 (10個) ==========
 
 @tree.command(name="help", description="顯示幫助訊息")
 async def help_slash(interaction: discord.Interaction):
@@ -676,7 +820,7 @@ async def help_slash(interaction: discord.Interaction):
     )
     
     embed.add_field(
-        name="👤 用戶指令 (9個)",
+        name="👤 用戶指令 (10個)",
         value=(
             "`/help` - 顯示此幫助訊息\n"
             "`/profile` - 查看我的數據\n"
@@ -686,7 +830,8 @@ async def help_slash(interaction: discord.Interaction):
             "`/prizelist` - 查看彩池列表\n"
             "`/random_team [人數] [組數]` - 隨機分組\n"
             "`/score_ranking` - 查看積分排行榜\n"
-            "`/attendance_ranking` - 查看出席率排行榜"
+            "`/attendance_ranking` - 查看出席率排行榜\n"
+            "`/blessing` - 測試今日運程 **(新增)**"
         ),
         inline=False
     )
@@ -694,7 +839,7 @@ async def help_slash(interaction: discord.Interaction):
     embed.add_field(
         name="🛠️ 管理員指令 (4個)",
         value=(
-            "`/add_prize [名稱] [類型] [數量]` - 調整彩池\n"
+            "`/add_prize [名稱] [類型] [數量]` - **調整彩池 (可增減)**\n"
             "`/add_score [用戶] [積分] [原因]` - 加減積分\n"
             "`/create_event [活動名稱]` - 創建評核活動\n"
             "`/activity_stats` - 查看活動統計"
@@ -705,18 +850,19 @@ async def help_slash(interaction: discord.Interaction):
     embed.add_field(
         name="💰 積分系統",
         value=(
-            "**簽到獎勵：** 40積分\n"
-            "**職業加成：** 補師+20積分\n"
+            "**聊天獎勵：** 每句話 +5 分，每日上限 20 分 **(新增)**\n"
+            "**簽到獎勵：** 40 積分\n"
+            "**職業加成：** 補師 +20 積分\n"
             "**評核獎勵：**\n"
-            "  • 優秀：+40積分\n"
-            "  • 良好：+10積分\n"
-            "  • 普通：+0積分（預設）\n"
-            "  • 不合格：-5積分"
+            "  • 優秀：+40 積分\n"
+            "  • 良好：+10 積分\n"
+            "  • 普通：+0 積分（預設）\n"
+            "  • 不合格：-5 積分"
         ),
         inline=False
     )
     
-    embed.set_footer(text=f"總指令數: 13個 | 版本: 完整版")
+    embed.set_footer(text=f"總指令數: 14個 | 版本: PostgreSQL 持久化版本")
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="profile", description="查看我的數據")
@@ -734,12 +880,10 @@ async def profile_slash(interaction: discord.Interaction):
         profile = await get_user_profile(user_id, guild_id)
         
         if not profile:
-            async with aiosqlite.connect(DB_NAME) as conn:
-                await conn.execute(
-                    "INSERT OR IGNORE INTO users (user_id, username, current_score, total_score, guild_id) VALUES (?, ?, ?, ?, ?)",
-                    (user_id, username, 0, 0, guild_id)
-                )
-                await conn.commit()
+            await db.execute(
+                "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                user_id, username, 0, 0, guild_id
+            )
             
             profile = {
                 'user_id': user_id,
@@ -939,12 +1083,13 @@ async def giveaway_slash(
         await message.add_reaction("🎫")
         await message.add_reaction("⏹️")
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            await conn.execute('''
-                INSERT INTO giveaways (creator_id, prize, winner_count, end_time, message_id, channel_id, guild_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (interaction.user.id, prize, winners, end_time, message.id, interaction.channel.id, guild_id))
-            await conn.commit()
+        await db.execute(
+            '''
+            INSERT INTO giveaways (creator_id, prize, winner_count, end_time, message_id, channel_id, guild_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ''',
+            interaction.user.id, prize, winners, end_time, message.id, interaction.channel.id, guild_id
+        )
         
         print(f"✅ 抽獎已創建: 獎品={prize}, 時間={seconds}秒, 訊息ID={message.id}")
         
@@ -971,13 +1116,14 @@ async def giveaway_slash(
                         time_display = f"{days}天{hours}小時"
                     
                     try:
-                        async with aiosqlite.connect(DB_NAME) as conn:
-                            async with conn.execute("SELECT participants FROM giveaways WHERE message_id = ? AND guild_id = ?", (message.id, guild_id)) as cursor:
-                                result = await cursor.fetchone()
-                                participants_count = 0
-                                if result and result[0]:
-                                    participants = json.loads(result[0])
-                                    participants_count = len(participants)
+                        result = await db.fetchrow(
+                            "SELECT participants FROM giveaways WHERE message_id = $1 AND guild_id = $2",
+                            message.id, guild_id
+                        )
+                        participants_count = 0
+                        if result and result['participants']:
+                            participants = result['participants']
+                            participants_count = len(participants)
                         
                         new_embed = discord.Embed(
                             title="🎉 自動抽獎活動 🎉",
@@ -1097,28 +1243,31 @@ async def score_draw_slash(interaction: discord.Interaction):
                 box_weights_list = list(box_weights.values())
                 selected_box = random.choices(box_types, weights=box_weights_list, k=1)[0]
                 
-                async with aiosqlite.connect(DB_NAME) as conn:
-                    async with conn.execute(
-                        "SELECT id, prize_name FROM prize_pool WHERE box_level = ? AND remaining > 0 AND guild_id = ? ORDER BY RANDOM() LIMIT 1",
-                        (selected_box, self.guild_id)
-                    ) as cursor:
-                        result = await cursor.fetchone()
-                    
-                    if not result:
-                        await interaction.response.send_message(f"❌ {selected_box}中沒有可用獎品！", ephemeral=True)
-                        return
-                    
-                    prize_id, prize_name = result
-                    
-                    await update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎 ({selected_box})", self.guild_id)
-                    await conn.execute("UPDATE prize_pool SET remaining = remaining - 1 WHERE id = ?", (prize_id,))
-                    
-                    await conn.execute('''
-                        INSERT INTO score_draws (creator_id, score_cost, box_level, winner_prize, winner_id, guild_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (interaction.user.id, score_cost, selected_box, prize_name, interaction.user.id, self.guild_id))
-                    
-                    await conn.commit()
+                result = await db.fetchrow(
+                    "SELECT id, prize_name FROM prize_pool WHERE box_level = $1 AND remaining > 0 AND guild_id = $2 ORDER BY RANDOM() LIMIT 1",
+                    selected_box, self.guild_id
+                )
+                
+                if not result:
+                    await interaction.response.send_message(f"❌ {selected_box}中沒有可用獎品！", ephemeral=True)
+                    return
+                
+                prize_id = result['id']
+                prize_name = result['prize_name']
+                
+                await update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎 ({selected_box})", self.guild_id)
+                await db.execute(
+                    "UPDATE prize_pool SET remaining = remaining - 1 WHERE id = $1",
+                    prize_id
+                )
+                
+                await db.execute(
+                    '''
+                    INSERT INTO score_draws (creator_id, score_cost, box_level, winner_prize, winner_id, guild_id)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ''',
+                    interaction.user.id, score_cost, selected_box, prize_name, interaction.user.id, self.guild_id
+                )
                 
                 new_current_score, _ = await get_user_score(interaction.user.id, self.guild_id)
                 
@@ -1227,80 +1376,89 @@ async def prizelist_slash(interaction: discord.Interaction):
         guild_id = get_guild_id(interaction)
         await log_query("prizelist", interaction.user.id, {"action": "view_pool"}, guild_id)
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prize_pool'") as cursor:
-                if not await cursor.fetchone():
-                    embed = discord.Embed(
-                        title="❌ 彩池表格不存在",
-                        description="請重新啟動機器人以初始化資料庫",
-                        color=0xFF0000
-                    )
-                    await interaction.followup.send(embed=embed)
-                    return
-            
-            async with conn.execute("""
-                SELECT box_level, 
-                       COUNT(*) as total_items,
-                       SUM(remaining) as total_remaining
-                FROM prize_pool 
-                WHERE remaining > 0 AND guild_id = ?
-                GROUP BY box_level 
-                ORDER BY 
-                    CASE box_level 
-                        WHEN '金箱' THEN 1 
-                        WHEN '紫箱' THEN 2 
-                        WHEN '藍箱' THEN 3 
-                        WHEN '綠箱' THEN 4 
-                        ELSE 5 
-                    END
-            """, (guild_id,)) as cursor:
-                results = await cursor.fetchall()
-            
-            if not results:
-                embed = discord.Embed(
-                    title="🎁 彩池列表",
-                    description="目前彩池是空的\n使用 `/add_prize` 添加獎品",
-                    color=0xFFD700
-                )
-                await interaction.followup.send(embed=embed)
-                return
-            
+        # 檢查表格是否存在
+        try:
+            await db.fetch("SELECT 1 FROM prize_pool LIMIT 1")
+        except:
+            embed = discord.Embed(
+                title="❌ 彩池表格不存在",
+                description="請重新啟動機器人以初始化資料庫",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        results = await db.fetch(
+            """
+            SELECT box_level, 
+                   COUNT(*) as total_items,
+                   SUM(remaining) as total_remaining
+            FROM prize_pool 
+            WHERE remaining > 0 AND guild_id = $1
+            GROUP BY box_level 
+            ORDER BY 
+                CASE box_level 
+                    WHEN '金箱' THEN 1 
+                    WHEN '紫箱' THEN 2 
+                    WHEN '藍箱' THEN 3 
+                    WHEN '綠箱' THEN 4 
+                    ELSE 5 
+                END
+            """,
+            guild_id
+        )
+        
+        if not results:
             embed = discord.Embed(
                 title="🎁 彩池列表",
-                description="可用的獎品（按寶箱等級分類）：",
+                description="目前彩池是空的\n使用 `/add_prize` 添加獎品",
                 color=0xFFD700
             )
+            await interaction.followup.send(embed=embed)
+            return
+        
+        embed = discord.Embed(
+            title="🎁 彩池列表",
+            description="可用的獎品（按寶箱等級分類）：",
+            color=0xFFD700
+        )
+        
+        for row in results:
+            box_level = row['box_level']
+            total_items = row['total_items']
+            total_remaining = row['total_remaining'] or 0
             
-            for box_level, total_items, total_remaining in results:
-                async with conn.execute("""
-                    SELECT prize_name, remaining 
-                    FROM prize_pool 
-                    WHERE box_level = ? AND remaining > 0 AND guild_id = ?
-                    ORDER BY prize_name
-                """, (box_level, guild_id)) as cursor:
-                    items = await cursor.fetchall()
-                
-                items_text = ""
-                displayed_count = 0
-                hidden_count = 0
-                
-                for prize_name, remaining in items:
-                    displayed_count += 1
-                    if displayed_count <= 8:
-                        items_text += f"• {prize_name} (剩餘: {remaining})\n"
-                    else:
-                        hidden_count += 1
-                
-                if hidden_count > 0:
-                    items_text += f"... 還有 {hidden_count} 個獎品\n"
-                
-                actual_total = sum(item[1] for item in items)
-                
-                embed.add_field(
-                    name=f"{box_level} (總剩餘: {actual_total} / 獎品種類: {total_items})",
-                    value=items_text if items_text else "無獎品",
-                    inline=False
-                )
+            items = await db.fetch(
+                """
+                SELECT prize_name, remaining 
+                FROM prize_pool 
+                WHERE box_level = $1 AND remaining > 0 AND guild_id = $2
+                ORDER BY prize_name
+                """,
+                box_level, guild_id
+            )
+            
+            items_text = ""
+            displayed_count = 0
+            hidden_count = 0
+            
+            for item in items:
+                displayed_count += 1
+                if displayed_count <= 8:
+                    items_text += f"• {item['prize_name']} (剩餘: {item['remaining']})\n"
+                else:
+                    hidden_count += 1
+            
+            if hidden_count > 0:
+                items_text += f"... 還有 {hidden_count} 個獎品\n"
+            
+            actual_total = sum(item['remaining'] for item in items)
+            
+            embed.add_field(
+                name=f"{box_level} (總剩餘: {actual_total} / 獎品種類: {total_items})",
+                value=items_text if items_text else "無獎品",
+                inline=False
+            )
         
         embed.add_field(
             name="📊 積分抽獎機率",
@@ -1484,16 +1642,17 @@ async def score_ranking_slash(interaction: discord.Interaction):
         guild_id = get_guild_id(interaction)
         await log_query("score_ranking", interaction.user.id, {"action": "view_ranking"}, guild_id)
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            # 獲取排行榜
-            async with conn.execute("""
-                SELECT user_id, username, current_score, total_score 
-                FROM users 
-                WHERE guild_id = ? 
-                ORDER BY current_score DESC 
-                LIMIT 15
-            """, (guild_id,)) as cursor:
-                results = await cursor.fetchall()
+        # 獲取排行榜
+        results = await db.fetch(
+            """
+            SELECT user_id, username, current_score, total_score 
+            FROM users 
+            WHERE guild_id = $1 
+            ORDER BY current_score DESC 
+            LIMIT 15
+            """,
+            guild_id
+        )
         
         if not results:
             embed = discord.Embed(
@@ -1511,7 +1670,7 @@ async def score_ranking_slash(interaction: discord.Interaction):
         )
         
         ranking_text = ""
-        for i, (user_id, username, current_score, total_score) in enumerate(results, 1):
+        for i, row in enumerate(results, 1):
             medal = ""
             if i == 1:
                 medal = "🥇 "
@@ -1520,21 +1679,27 @@ async def score_ranking_slash(interaction: discord.Interaction):
             elif i == 3:
                 medal = "🥉 "
             
-            ranking_text += f"**{medal}{i}. {username}**\n"
-            ranking_text += f"   當前：{current_score}分 | 總計：{total_score}分\n"
+            ranking_text += f"**{medal}{i}. {row['username']}**\n"
+            ranking_text += f"   當前：{row['current_score']}分 | 總計：{row['total_score']}分\n"
         
         embed.add_field(name="🏅 排名", value=ranking_text, inline=False)
         
         # 添加當前用戶排名
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("""
-                SELECT COUNT(*) FROM users 
-                WHERE guild_id = ? AND current_score > (
-                    SELECT current_score FROM users WHERE user_id = ? AND guild_id = ?
-                )
-            """, (guild_id, interaction.user.id, guild_id)) as cursor:
-                higher_count = (await cursor.fetchone())[0]
-                user_rank = higher_count + 1
+        result = await db.fetchrow(
+            """
+            SELECT COUNT(*) FROM users 
+            WHERE guild_id = $1 AND current_score > (
+                SELECT current_score FROM users WHERE user_id = $2 AND guild_id = $3
+            )
+            """,
+            guild_id, interaction.user.id, guild_id
+        )
+        
+        if result:
+            higher_count = result['count']
+            user_rank = higher_count + 1
+        else:
+            user_rank = 1
         
         embed.add_field(
             name="📊 你的排名",
@@ -1842,9 +2007,137 @@ async def attendance_ranking_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
+# ========== 新增 /blessing 指令 ==========
+
+@tree.command(name="blessing", description="測試今日運程")
+async def blessing_slash(interaction: discord.Interaction):
+    """測試運程"""
+    await interaction.response.defer()
+    
+    try:
+        # 運程選項和機率
+        blessings = {
+            "大吉": {"emoji": "🎉", "chance": 10, "color": 0xFFD700, "description": "今日事事順利，心想事成！"},
+            "吉": {"emoji": "😊", "chance": 25, "color": 0x90EE90, "description": "今日運氣不錯，會有好事發生。"},
+            "中尚": {"emoji": "😐", "chance": 40, "color": 0x87CEEB, "description": "平平安安的一天，穩紮穩打。"},
+            "凶": {"emoji": "😟", "chance": 20, "color": 0xFFA500, "description": "今日需小心謹慎，避免重大決定。"},
+            "大凶": {"emoji": "😨", "chance": 5, "color": 0xFF4500, "description": "諸事不順，建議低調行事。"}
+        }
+        
+        # 隨機選擇
+        choices = list(blessings.keys())
+        weights = [blessings[b]["chance"] for b in choices]
+        result = random.choices(choices, weights=weights, k=1)[0]
+        blessing_info = blessings[result]
+        
+        # 生成隨機建議
+        suggestions = {
+            "大吉": [
+                "適合進行投資或重要決策",
+                "告白成功率大幅提升",
+                "工作上會有意外收穫",
+                "出門可能會遇到貴人"
+            ],
+            "吉": [
+                "可以嘗試新的挑戰",
+                "與朋友聚會會有驚喜",
+                "學習效率特別高",
+                "適合規劃未來計畫"
+            ],
+            "中尚": [
+                "按部就班完成工作",
+                "保持平常心最重要",
+                "適合整理環境或思緒",
+                "避免衝動消費"
+            ],
+            "凶": [
+                "重要文件記得備份",
+                "外出注意交通安全",
+                "避免與人發生爭執",
+                "謹慎處理財務問題"
+            ],
+            "大凶": [
+                "盡量待在家裡休息",
+                "避免簽署重要文件",
+                "出門記得帶傘",
+                "今天適合低調行事"
+            ]
+        }
+        
+        user_suggestions = random.sample(suggestions[result], min(3, len(suggestions[result])))
+        
+        # 創建嵌入訊息
+        embed = discord.Embed(
+            title=f"{blessing_info['emoji']} {interaction.user.name} 的今日運程",
+            description=f"**{result}**\n{blessing_info['description']}",
+            color=blessing_info['color']
+        )
+        
+        # 添加詳細信息
+        embed.add_field(
+            name="📊 運程分析",
+            value=f"**運程等級：** {result}\n"
+                  f"**出現機率：** {blessing_info['chance']}%\n"
+                  f"**幸運顏色：** {'金色' if result == '大吉' else '綠色' if result == '吉' else '藍色' if result == '中尚' else '橙色' if result == '凶' else '紅色'}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🕰️ 最佳時段",
+            value=f"**上午：** {random.choice(['吉', '平', '凶'])}\n"
+                  f"**下午：** {random.choice(['吉', '平', '凶'])}\n"
+                  f"**晚上：** {random.choice(['吉', '平', '凶'])}",
+            inline=True
+        )
+        
+        # 添加建議
+        suggestions_text = ""
+        for i, suggestion in enumerate(user_suggestions, 1):
+            suggestions_text += f"{i}. {suggestion}\n"
+        
+        embed.add_field(
+            name="💡 今日建議",
+            value=suggestions_text,
+            inline=False
+        )
+        
+        # 添加幸運數字和方向
+        embed.add_field(
+            name="🎲 幸運數字",
+            value=f"{random.randint(1, 9)}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🧭 幸運方向",
+            value=random.choice(["東", "南", "西", "北"]),
+            inline=True
+        )
+        
+        # 隨機名言
+        quotes = [
+            "命運負責洗牌，但玩牌的是我們自己。",
+            "好運氣來自好習慣。",
+            "每一天都是新的開始。",
+            "心態決定狀態。"
+        ]
+        
+        embed.set_footer(text=random.choice(quotes))
+        embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 運程測試失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
+
 # ========== 管理員指令 (4個) ==========
 
-@tree.command(name="add_prize", description="添加獎品到彩池")
+@tree.command(name="add_prize", description="添加或減少彩池獎品")
 @app_commands.describe(
     name="獎品名稱",
     box_level="寶箱等級 (綠箱/藍箱/紫箱/金箱)",
@@ -1865,95 +2158,97 @@ async def add_prize_slash(
             return
         
         guild_id = get_guild_id(interaction)
-        await log_query("add_prize", interaction.user.id, {"name": name, "box_level": box_level, "quantity": quantity}, guild_id)
         
         valid_levels = ["綠箱", "藍箱", "紫箱", "金箱"]
         if box_level not in valid_levels:
             await interaction.followup.send(f"❌ 無效的寶箱等級！請選擇：{', '.join(valid_levels)}")
             return
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            async with conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='prize_pool'") as cursor:
-                if not await cursor.fetchone():
-                    error_embed = discord.Embed(
-                        title="❌ 彩池表格不存在",
-                        description="請重新啟動機器人以初始化資料庫",
-                        color=0xFF0000
-                    )
-                    await interaction.followup.send(embed=error_embed)
-                    return
+        if quantity > 0:
+            # 添加獎品
+            result = await db.fetchrow(
+                """
+                INSERT INTO prize_pool (prize_name, box_level, quantity, remaining, added_by, guild_id)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (prize_name, box_level, guild_id) 
+                DO UPDATE SET 
+                    quantity = prize_pool.quantity + EXCLUDED.quantity,
+                    remaining = prize_pool.remaining + EXCLUDED.quantity
+                RETURNING quantity, remaining
+                """,
+                name, box_level, quantity, quantity, interaction.user.id, guild_id
+            )
             
-            if quantity > 0:
-                await conn.execute('''
-                    INSERT INTO prize_pool (prize_name, box_level, quantity, remaining, added_by, guild_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(prize_name, box_level, guild_id) 
-                    DO UPDATE SET 
-                        quantity = quantity + excluded.quantity,
-                        remaining = remaining + excluded.quantity
-                ''', (name, box_level, quantity, quantity, interaction.user.id, guild_id))
-                
-                action = "添加"
-            elif quantity < 0:
-                await conn.execute('''
-                    UPDATE prize_pool 
-                    SET quantity = quantity + ?,
-                        remaining = CASE 
-                                        WHEN remaining + ? > 0 THEN remaining + ?
-                                        ELSE 0
-                                    END
-                    WHERE prize_name = ? AND box_level = ? AND guild_id = ?
-                ''', (quantity, quantity, quantity, name, box_level, guild_id))
-                
-                if (await conn.total_changes) == 0:
-                    await interaction.followup.send(f"❌ 找不到獎品 '{name}' 在 {box_level} 中")
-                    return
-                
-                action = "減少"
-            else:
-                await interaction.followup.send("❌ 數量不能為 0")
+            action = "添加"
+            
+        elif quantity < 0:
+            # 減少獎品 - 先檢查現有數量
+            existing = await db.fetchrow(
+                "SELECT quantity, remaining FROM prize_pool WHERE prize_name = $1 AND box_level = $2 AND guild_id = $3",
+                name, box_level, guild_id
+            )
+            
+            if not existing:
+                await interaction.followup.send(f"❌ 找不到獎品 '{name}' 在 {box_level} 中")
                 return
             
-            async with conn.execute("SELECT quantity, remaining FROM prize_pool WHERE prize_name = ? AND box_level = ? AND guild_id = ?", 
-                          (name, box_level, guild_id)) as cursor:
-                result = await cursor.fetchone()
+            current_qty = existing['quantity']
+            current_remaining = existing['remaining']
             
-            if result:
-                total_qty, remaining_qty = result
-                
-                embed = discord.Embed(
-                    title=f"✅ 獎品{action}成功",
-                    color=0x2ECC71 if quantity > 0 else 0xE74C3C
+            # 計算新的數量（不能少於0）
+            new_qty = max(current_qty + quantity, 0)
+            new_remaining = max(current_remaining + quantity, 0)
+            
+            if new_qty == 0:
+                # 如果數量變為0，刪除該記錄
+                await db.execute(
+                    "DELETE FROM prize_pool WHERE prize_name = $1 AND box_level = $2 AND guild_id = $3",
+                    name, box_level, guild_id
                 )
-                
-                embed.add_field(name="獎品名稱", value=name, inline=True)
-                embed.add_field(name="寶箱等級", value=box_level, inline=True)
-                embed.add_field(name=f"{action}數量", value=f"{abs(quantity)} 個", inline=True)
-                embed.add_field(name="總數量", value=f"{total_qty} 個", inline=True)
-                embed.add_field(name="剩餘數量", value=f"{remaining_qty} 個", inline=True)
-                embed.add_field(name="操作者", value=interaction.user.mention, inline=True)
-                
-                await interaction.followup.send(embed=embed)
+                action = "刪除"
+                total_qty = 0
+                remaining_qty = 0
             else:
-                await interaction.followup.send(f"❌ 操作失敗")
-            
-            await conn.commit()
-            
-    except sqlite3.OperationalError as e:
-        if "no such column" in str(e) or "no such table" in str(e):
-            error_embed = discord.Embed(
-                title="❌ 資料庫結構錯誤",
-                description="請刪除 bot_data.db 檔案後重新啟動機器人",
-                color=0xFF0000
-            )
-            await interaction.followup.send(embed=error_embed)
+                # 更新數量
+                await db.execute(
+                    """
+                    UPDATE prize_pool 
+                    SET quantity = $1, remaining = $2
+                    WHERE prize_name = $3 AND box_level = $4 AND guild_id = $5
+                    """,
+                    new_qty, new_remaining, name, box_level, guild_id
+                )
+                action = "減少"
+                total_qty = new_qty
+                remaining_qty = new_remaining
         else:
-            error_embed = discord.Embed(
-                title="❌ 操作失敗",
-                description=f"資料庫錯誤：{str(e)}",
-                color=0xFF0000
-            )
-            await interaction.followup.send(embed=error_embed)
+            await interaction.followup.send("❌ 數量不能為 0")
+            return
+        
+        if quantity > 0 or (quantity < 0 and new_qty > 0):
+            total_qty = result['quantity']
+            remaining_qty = result['remaining']
+        
+        # 發送結果
+        color = 0x2ECC71 if quantity > 0 else 0xE74C3C
+        title = "✅ 獎品操作成功" if action != "刪除" else "✅ 獎品已刪除"
+        
+        embed = discord.Embed(title=title, color=color)
+        embed.add_field(name="獎品名稱", value=name, inline=True)
+        embed.add_field(name="寶箱等級", value=box_level, inline=True)
+        
+        if action != "刪除":
+            embed.add_field(name=f"{action}數量", value=f"{abs(quantity)} 個", inline=True)
+            embed.add_field(name="總數量", value=f"{total_qty} 個", inline=True)
+            embed.add_field(name="剩餘數量", value=f"{remaining_qty} 個", inline=True)
+        else:
+            embed.add_field(name="操作", value="已從彩池中刪除", inline=True)
+            embed.add_field(name="原數量", value=f"{current_qty} 個", inline=True)
+        
+        embed.add_field(name="操作者", value=interaction.user.mention, inline=True)
+        
+        await interaction.followup.send(embed=embed)
+        
     except Exception as e:
         error_embed = discord.Embed(
             title="❌ 操作失敗",
@@ -2078,12 +2373,13 @@ async def create_event_slash(
         signup_end_time = datetime.now() + timedelta(minutes=signup_time)
         
         # 儲存活動到資料庫
-        async with aiosqlite.connect(DB_NAME) as conn:
-            await conn.execute('''
-                INSERT INTO evaluation_events (event_name, creator_id, signup_message_id, profession_message_id, channel_id, signup_end_time, guild_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (event_name, interaction.user.id, signup_message.id, class_msg.id, interaction.channel.id, signup_end_time, guild_id))
-            await conn.commit()
+        await db.execute(
+            '''
+            INSERT INTO evaluation_events (event_name, creator_id, signup_message_id, profession_message_id, channel_id, signup_end_time, guild_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ''',
+            event_name, interaction.user.id, signup_message.id, class_msg.id, interaction.channel.id, signup_end_time, guild_id
+        )
         
         print(f"✅ 活動創建成功: {event_name}, 簽到訊息ID: {signup_message.id}, 職業訊息ID: {class_msg.id}")
         
@@ -2096,14 +2392,15 @@ async def create_event_slash(
                 remaining_minutes -= 1
                 
                 try:
-                    async with aiosqlite.connect(DB_NAME) as conn:
-                        async with conn.execute("SELECT participants FROM evaluation_events WHERE signup_message_id = ? AND guild_id = ?", (signup_message.id, guild_id)) as cursor:
-                            result = await cursor.fetchone()
-                        
-                        participants_count = 0
-                        if result and result[0]:
-                            participants = json.loads(result[0])
-                            participants_count = len(participants)
+                    result = await db.fetchrow(
+                        "SELECT participants FROM evaluation_events WHERE signup_message_id = $1 AND guild_id = $2",
+                        signup_message.id, guild_id
+                    )
+                    
+                    participants_count = 0
+                    if result and result['participants']:
+                        participants = result['participants']
+                        participants_count = len(participants)
                     
                     updated_embed = discord.Embed(
                         title=f"📋 評核活動：{event_name}",
@@ -2131,24 +2428,26 @@ async def create_event_slash(
             
             # 簽到時間結束，處理簽到結果
             try:
-                async with aiosqlite.connect(DB_NAME) as conn:
-                    async with conn.execute("SELECT participants FROM evaluation_events WHERE signup_message_id = ? AND guild_id = ?", (signup_message.id, guild_id)) as cursor:
-                        result = await cursor.fetchone()
-                    
-                    participants = []
-                    if result and result[0]:
-                        participants = json.loads(result[0])
-                    
-                    # 為所有參與者發放簽到獎勵
-                    for user_id in participants:
-                        await update_user_score(user_id, f"用戶{user_id}", SIGNUP_SCORE, f"活動簽到: {event_name}", guild_id)
-                        await update_user_activity(user_id, event_name, attended=True, guild_id=guild_id)
-                        await update_user_rating(user_id, "普通", guild_id)
-                    
-                    # 更新活動狀態
-                    await conn.execute("UPDATE evaluation_events SET default_rated = ?, is_active = 1 WHERE signup_message_id = ? AND guild_id = ?", 
-                                     (json.dumps(participants), signup_message.id, guild_id))
-                    await conn.commit()
+                result = await db.fetchrow(
+                    "SELECT participants FROM evaluation_events WHERE signup_message_id = $1 AND guild_id = $2",
+                    signup_message.id, guild_id
+                )
+                
+                participants = []
+                if result and result['participants']:
+                    participants = result['participants']
+                
+                # 為所有參與者發放簽到獎勵
+                for user_id in participants:
+                    await update_user_score(user_id, f"用戶{user_id}", SIGNUP_SCORE, f"活動簽到: {event_name}", guild_id)
+                    await update_user_activity(user_id, event_name, attended=True, guild_id=guild_id)
+                    await update_user_rating(user_id, "普通", guild_id)
+                
+                # 更新活動狀態
+                await db.execute(
+                    "UPDATE evaluation_events SET default_rated = $1, is_active = true WHERE signup_message_id = $2 AND guild_id = $3",
+                    participants, signup_message.id, guild_id
+                )
                 
                 # 更新簽到訊息
                 end_embed = discord.Embed(
@@ -2207,10 +2506,10 @@ async def create_event_slash(
                     await rating_msg.add_reaction(emoji)
                 
                 # 儲存評核訊息ID
-                async with aiosqlite.connect(DB_NAME) as conn:
-                    await conn.execute("UPDATE evaluation_events SET rating_message_id = ? WHERE signup_message_id = ? AND guild_id = ?", 
-                                     (rating_msg.id, signup_message.id, guild_id))
-                    await conn.commit()
+                await db.execute(
+                    "UPDATE evaluation_events SET rating_message_id = $1 WHERE signup_message_id = $2 AND guild_id = $3",
+                    rating_msg.id, signup_message.id, guild_id
+                )
                 
                 print(f"✅ 評核階段已創建: {event_name}, 評核訊息ID: {rating_msg.id}")
                 
@@ -2253,39 +2552,57 @@ async def activity_stats_slash(interaction: discord.Interaction):
         guild_id = get_guild_id(interaction)
         await log_query("activity_stats", interaction.user.id, {"action": "view_stats"}, guild_id)
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            # 獲取活動統計
-            async with conn.execute("SELECT COUNT(*) FROM evaluation_events WHERE guild_id = ?", (guild_id,)) as cursor:
-                total_events = (await cursor.fetchone())[0]
-            
-            async with conn.execute("SELECT COUNT(*) FROM evaluation_events WHERE guild_id = ? AND is_active = 1", (guild_id,)) as cursor:
-                active_events = (await cursor.fetchone())[0]
-            
-            async with conn.execute("SELECT COUNT(*) FROM giveaways WHERE guild_id = ?", (guild_id,)) as cursor:
-                total_giveaways = (await cursor.fetchone())[0]
-            
-            async with conn.execute("SELECT COUNT(*) FROM giveaways WHERE guild_id = ? AND is_active = 1", (guild_id,)) as cursor:
-                active_giveaways = (await cursor.fetchone())[0]
-            
-            # 獲取用戶統計
-            async with conn.execute("SELECT COUNT(*) FROM users WHERE guild_id = ?", (guild_id,)) as cursor:
-                total_users = (await cursor.fetchone())[0]
-            
-            async with conn.execute("SELECT SUM(current_score), SUM(total_score) FROM users WHERE guild_id = ?", (guild_id,)) as cursor:
-                score_result = await cursor.fetchone()
-                total_current_score = score_result[0] or 0
-                total_earned_score = score_result[1] or 0
-            
-            # 獲取最近活動
-            async with conn.execute("""
-                SELECT event_name, COUNT(*) as participant_count, start_time 
-                FROM evaluation_events 
-                WHERE guild_id = ? 
-                GROUP BY event_name 
-                ORDER BY start_time DESC 
-                LIMIT 5
-            """, (guild_id,)) as cursor:
-                recent_events = await cursor.fetchall()
+        # 獲取活動統計
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM evaluation_events WHERE guild_id = $1",
+            guild_id
+        )
+        total_events = result['count'] if result else 0
+        
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM evaluation_events WHERE guild_id = $1 AND is_active = true",
+            guild_id
+        )
+        active_events = result['count'] if result else 0
+        
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM giveaways WHERE guild_id = $1",
+            guild_id
+        )
+        total_giveaways = result['count'] if result else 0
+        
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM giveaways WHERE guild_id = $1 AND is_active = true",
+            guild_id
+        )
+        active_giveaways = result['count'] if result else 0
+        
+        # 獲取用戶統計
+        result = await db.fetchrow(
+            "SELECT COUNT(*) FROM users WHERE guild_id = $1",
+            guild_id
+        )
+        total_users = result['count'] if result else 0
+        
+        result = await db.fetchrow(
+            "SELECT SUM(current_score), SUM(total_score) FROM users WHERE guild_id = $1",
+            guild_id
+        )
+        total_current_score = result['sum'] or 0 if result else 0
+        total_earned_score = result['sum_1'] or 0 if result else 0
+        
+        # 獲取最近活動
+        recent_events = await db.fetch(
+            """
+            SELECT event_name, COUNT(*) as participant_count, start_time 
+            FROM evaluation_events 
+            WHERE guild_id = $1 
+            GROUP BY event_name, start_time 
+            ORDER BY start_time DESC 
+            LIMIT 5
+            """,
+            guild_id
+        )
         
         embed = discord.Embed(
             title="📊 活動統計數據",
@@ -2307,11 +2624,19 @@ async def activity_stats_slash(interaction: discord.Interaction):
         
         if recent_events:
             events_text = ""
-            for event_name, participant_count, start_time in recent_events:
+            for row in recent_events:
+                event_name = row['event_name']
+                participant_count = row['participant_count']
+                start_time = row['start_time']
+                
                 try:
-                    time_str = datetime.strptime(start_time.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%m/%d %H:%M')
+                    if isinstance(start_time, str):
+                        time_str = datetime.strptime(start_time.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%m/%d %H:%M')
+                    else:
+                        time_str = start_time.strftime('%m/%d %H:%M')
                 except:
-                    time_str = start_time
+                    time_str = str(start_time)
+                
                 events_text += f"• **{event_name}**\n  👥 {participant_count}人 | 📅 {time_str}\n"
             
             embed.add_field(name="📅 最近活動", value=events_text, inline=False)
@@ -2329,39 +2654,45 @@ async def activity_stats_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-# ========== 事件處理 ==========
+# ========== 聊天積分事件 ==========
 
 @bot.event
-async def on_ready():
-    """機器人上線"""
-    print(f"\n{'='*60}")
-    print(f"🤖 {BOT_NAME} 已上線")
-    print(f"📊 伺服器數量: {len(bot.guilds)}")
-    print(f"{'='*60}")
+async def on_message(message):
+    """處理聊天積分"""
+    # 忽略機器人自己的訊息
+    if message.author.bot:
+        return
     
-    await init_db()
-    print("✅ 資料庫初始化完成")
+    # 忽略指令訊息
+    if message.content.startswith(('!', '/', bot.command_prefix)):
+        await bot.process_commands(message)
+        return
     
     try:
-        print("\n🔄 正在同步指令...")
-        global_synced = await tree.sync()
-        print(f"✅ 已同步 {len(global_synced)} 個指令")
-        
-        print("\n📋 可用指令 (13個):")
-        for cmd in global_synced:
-            print(f"  • /{cmd.name} - {cmd.description}")
-        
-    except Exception as e:
-        print(f"❌ 同步失敗: {e}")
-    
-    await bot.change_presence(
-        activity=discord.Activity(
-            type=discord.ActivityType.watching,
-            name="/help 查看13個指令"
+        # 添加聊天積分
+        guild_id = get_guild_id(message)
+        added_score, daily_limit = await add_chat_score(
+            message.author.id, 
+            message.author.name,
+            guild_id
         )
-    )
+        
+        # 隨機發送鼓勵訊息（機率 1%）
+        if added_score > 0 and random.random() < 0.01:
+            responses = [
+                f"💬 聊天 +{added_score} 分！繼續保持～",
+                f"✨ 活躍獎勵 +{added_score} 分！",
+                f"🎯 發言獲得 +{added_score} 分！"
+            ]
+            await message.channel.send(random.choice(responses), delete_after=10)
+            
+    except Exception as e:
+        print(f"處理聊天積分錯誤: {e}")
     
-    print(f"\n🎮 機器人準備就緒！指令數: 13")
+    # 繼續處理其他事件
+    await bot.process_commands(message)
+
+# ========== 事件處理 ==========
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -2384,328 +2715,257 @@ async def on_raw_reaction_add(payload):
         
         guild_id = payload.guild_id if hasattr(payload, 'guild_id') else 0
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            # 檢查是否是評核活動的評核訊息
-            async with conn.execute("""
-                SELECT id, channel_id, event_name 
-                FROM evaluation_events 
-                WHERE rating_message_id = ? AND is_active = 1 AND guild_id = ?
-            """, (payload.message_id, guild_id)) as cursor:
-                rating_event = await cursor.fetchone()
+        # 檢查是否是評核活動的評核訊息
+        result = await db.fetchrow(
+            """
+            SELECT id, channel_id, event_name 
+            FROM evaluation_events 
+            WHERE rating_message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            payload.message_id, guild_id
+        )
+        
+        if result and emoji == RATING_END_EMOJI:
+            event_id = result['id']
+            event_channel_id = result['channel_id']
+            event_name = result['event_name']
             
-            if rating_event and emoji == RATING_END_EMOJI:
-                event_id, event_channel_id, event_name = rating_event
-                
-                try:
-                    guild = channel.guild
-                    member = await guild.fetch_member(user_id)
-                    if not member.guild_permissions.administrator:
-                        try:
-                            await message.remove_reaction(emoji, member)
-                            await channel.send(f"❌ <@{user_id}> 只有管理員可以結束評核活動！", delete_after=5)
-                        except:
-                            pass
-                        return
-                except Exception as admin_error:
-                    print(f"檢查管理員權限錯誤: {admin_error}")
+            try:
+                guild = channel.guild
+                member = await guild.fetch_member(user_id)
+                if not member.guild_permissions.administrator:
+                    try:
+                        await message.remove_reaction(emoji, member)
+                        await channel.send(f"❌ <@{user_id}> 只有管理員可以結束評核活動！", delete_after=5)
+                    except:
+                        pass
                     return
-                
-                confirm_embed = discord.Embed(
-                    title="🏁 確認結束評核活動",
-                    description=f"你確定要結束 **{event_name}** 的評核階段嗎？\n\n"
-                              f"結束後將：\n"
-                              f"• 無法再進行評核\n"
-                              f"• 清除評核訊息的所有反應\n"
-                              f"• 活動標記為已完成",
-                    color=discord.Color.orange()
-                )
-                
-                class ConfirmEndView(discord.ui.View):
-                    def __init__(self, event_id, channel, event_name, guild_id):
-                        super().__init__(timeout=60)
-                        self.event_id = event_id
-                        self.channel = channel
-                        self.event_name = event_name
-                        self.guild_id = guild_id
-                    
-                    @discord.ui.button(label="確定結束", style=discord.ButtonStyle.danger, emoji="✅")
-                    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-                        if not interaction.user.guild_permissions.administrator:
-                            await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
-                            return
-                        
-                        await interaction.response.defer()
-                        
-                        await end_evaluation(self.event_id, self.channel, self.event_name, self.guild_id)
-                        
-                        for child in self.children:
-                            child.disabled = True
-                        await interaction.message.edit(view=self)
-                        
-                        await interaction.followup.send(f"✅ 已成功結束 **{self.event_name}** 的評核階段！")
-                    
-                    @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="❌")
-                    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-                        if not interaction.user.guild_permissions.administrator:
-                            await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
-                            return
-                        
-                        await interaction.response.send_message("已取消結束評核活動", ephemeral=True)
-                        
-                        for child in self.children:
-                            child.disabled = True
-                        await interaction.message.edit(view=self)
-                
-                view = ConfirmEndView(event_id, channel, event_name, guild_id)
-                await channel.send(f"<@{user_id}>", embed=confirm_embed, view=view)
+            except Exception as admin_error:
+                print(f"檢查管理員權限錯誤: {admin_error}")
                 return
             
-            # 檢查是否是評核活動的評核反應
-            if rating_event and emoji in RATING_EMOJIS:
-                event_id, event_channel_id, event_name = rating_event
-                rating_type = RATING_EMOJIS[emoji]
+            confirm_embed = discord.Embed(
+                title="🏁 確認結束評核活動",
+                description=f"你確定要結束 **{event_name}** 的評核階段嗎？\n\n"
+                          f"結束後將：\n"
+                          f"• 無法再進行評核\n"
+                          f"• 清除評核訊息的所有反應\n"
+                          f"• 活動標記為已完成",
+                color=discord.Color.orange()
+            )
+            
+            class ConfirmEndView(discord.ui.View):
+                def __init__(self, event_id, channel, event_name, guild_id):
+                    super().__init__(timeout=60)
+                    self.event_id = event_id
+                    self.channel = channel
+                    self.event_name = event_name
+                    self.guild_id = guild_id
                 
-                print(f"檢測到評核反應: event_id={event_id}, rating_type={rating_type}, user_id={user_id}")
-                
-                try:
-                    guild = channel.guild
-                    member = await guild.fetch_member(user_id)
-                    if not member.guild_permissions.administrator:
-                        try:
-                            await message.remove_reaction(emoji, member)
-                            await channel.send(f"❌ <@{user_id}> 只有管理員可以進行評核！", delete_after=5)
-                        except:
-                            pass
+                @discord.ui.button(label="確定結束", style=discord.ButtonStyle.danger, emoji="✅")
+                async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if not interaction.user.guild_permissions.administrator:
+                        await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
                         return
-                except Exception as admin_error:
-                    print(f"檢查管理員權限錯誤: {admin_error}")
+                    
+                    await interaction.response.defer()
+                    
+                    await end_evaluation(self.event_id, self.channel, self.event_name, self.guild_id)
+                    
+                    for child in self.children:
+                        child.disabled = True
+                    await interaction.message.edit(view=self)
+                    
+                    await interaction.followup.send(f"✅ 已成功結束 **{self.event_name}** 的評核階段！")
+                
+                @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="❌")
+                async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if not interaction.user.guild_permissions.administrator:
+                        await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
+                        return
+                    
+                    await interaction.response.send_message("已取消結束評核活動", ephemeral=True)
+                    
+                    for child in self.children:
+                        child.disabled = True
+                    await interaction.message.edit(view=self)
+            
+            view = ConfirmEndView(event_id, channel, event_name, guild_id)
+            await channel.send(f"<@{user_id}>", embed=confirm_embed, view=view)
+            return
+        
+        # 檢查是否是評核活動的評核反應
+        if result and emoji in RATING_EMOJIS:
+            event_id = result['id']
+            event_channel_id = result['channel_id']
+            event_name = result['event_name']
+            rating_type = RATING_EMOJIS[emoji]
+            
+            print(f"檢測到評核反應: event_id={event_id}, rating_type={rating_type}, user_id={user_id}")
+            
+            try:
+                guild = channel.guild
+                member = await guild.fetch_member(user_id)
+                if not member.guild_permissions.administrator:
+                    try:
+                        await message.remove_reaction(emoji, member)
+                        await channel.send(f"❌ <@{user_id}> 只有管理員可以進行評核！", delete_after=5)
+                    except:
+                        pass
                     return
-                
-                async with conn.execute("SELECT participants FROM evaluation_events WHERE id = ? AND guild_id = ?", (event_id, guild_id)) as cursor:
-                    result = await cursor.fetchone()
-                
-                participants = []
-                if result and result[0]:
-                    participants = json.loads(result[0])
-                
-                if not participants:
-                    await channel.send("❌ 沒有參與者可以評核", delete_after=5)
-                    return
-                
-                print(f"活動 {event_name} 有 {len(participants)} 位參與者可以評核")
-                
-                class ParticipantSelectView(discord.ui.View):
-                    def __init__(self, participants, event_id, rating_type, channel, bot_instance, guild_id):
-                        super().__init__(timeout=60)
-                        self.participants = participants
-                        self.event_id = event_id
-                        self.rating_type = rating_type
-                        self.channel = channel
-                        self.bot = bot_instance
-                        self.guild_id = guild_id
+            except Exception as admin_error:
+                print(f"檢查管理員權限錯誤: {admin_error}")
+                return
+            
+            result2 = await db.fetchrow(
+                "SELECT participants FROM evaluation_events WHERE id = $1 AND guild_id = $2",
+                event_id, guild_id
+            )
+            
+            participants = []
+            if result2 and result2['participants']:
+                participants = result2['participants']
+            
+            if not participants:
+                await channel.send("❌ 沒有參與者可以評核", delete_after=5)
+                return
+            
+            print(f"活動 {event_name} 有 {len(participants)} 位參與者可以評核")
+            
+            class ParticipantSelectView(discord.ui.View):
+                def __init__(self, participants, event_id, rating_type, channel, bot_instance, guild_id):
+                    super().__init__(timeout=60)
+                    self.participants = participants
+                    self.event_id = event_id
+                    self.rating_type = rating_type
+                    self.channel = channel
+                    self.bot = bot_instance
+                    self.guild_id = guild_id
+                    
+                    options = []
+                    for pid in participants[:25]:
+                        member = self.bot.get_user(int(pid))
+                        display_name = member.display_name if member else f"用戶ID: {pid}"
+                        options.append(discord.SelectOption(
+                            label=display_name[:100],
+                            value=str(pid),
+                            description=f"點擊選擇此用戶進行 {rating_type} 評核"
+                        ))
+                    
+                    select = discord.ui.Select(
+                        placeholder=f"選擇要評核為 {rating_type} 的參與者",
+                        options=options,
+                        min_values=1,
+                        max_values=1
+                    )
+                    
+                    async def select_callback(interaction: discord.Interaction):
+                        if not interaction.user.guild_permissions.administrator:
+                            await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
+                            return
                         
-                        options = []
-                        for pid in participants[:25]:
-                            member = self.bot.get_user(int(pid))
-                            display_name = member.display_name if member else f"用戶ID: {pid}"
-                            options.append(discord.SelectOption(
-                                label=display_name[:100],
-                                value=str(pid),
-                                description=f"點擊選擇此用戶進行 {rating_type} 評核"
-                            ))
+                        selected_user_id = int(select.values[0])
+                        selected_member = self.bot.get_user(selected_user_id)
+                        display_name = selected_member.display_name if selected_member else f"用戶ID: {selected_user_id}"
                         
-                        select = discord.ui.Select(
-                            placeholder=f"選擇要評核為 {rating_type} 的參與者",
-                            options=options,
-                            min_values=1,
-                            max_values=1
+                        print(f"選擇了用戶 {display_name} ({selected_user_id}) 進行 {rating_type} 評核")
+                        
+                        result3 = await db.fetchrow(
+                            "SELECT ratings FROM evaluation_events WHERE id = $1 AND guild_id = $2",
+                            self.event_id, self.guild_id
                         )
                         
-                        async def select_callback(interaction: discord.Interaction):
-                            if not interaction.user.guild_permissions.administrator:
-                                await interaction.response.send_message("❌ 需要管理員權限", ephemeral=True)
-                                return
-                            
-                            selected_user_id = int(select.values[0])
-                            selected_member = self.bot.get_user(selected_user_id)
-                            display_name = selected_member.display_name if selected_member else f"用戶ID: {selected_user_id}"
-                            
-                            print(f"選擇了用戶 {display_name} ({selected_user_id}) 進行 {rating_type} 評核")
-                            
-                            async with aiosqlite.connect(DB_NAME) as conn:
-                                async with conn.execute("SELECT ratings FROM evaluation_events WHERE id = ? AND guild_id = ?", (self.event_id, self.guild_id)) as cursor:
-                                    result = await cursor.fetchone()
-                                
-                                ratings = {}
-                                if result and result[0]:
-                                    ratings = json.loads(result[0])
-                                
-                                old_rating = None
-                                if str(selected_user_id) in ratings and ratings[str(selected_user_id)]:
-                                    old_rating = ratings[str(selected_user_id)][-1]["rating"] if ratings[str(selected_user_id)] else None
-                                
-                                if str(selected_user_id) not in ratings:
-                                    ratings[str(selected_user_id)] = []
-                                
-                                ratings[str(selected_user_id)].append({
-                                    "rater": interaction.user.id,
-                                    "rating": self.rating_type,
-                                    "time": datetime.now().isoformat()
-                                })
-                                
-                                await conn.execute("UPDATE evaluation_events SET ratings = ? WHERE id = ? AND guild_id = ?", 
-                                                 (json.dumps(ratings), self.event_id, self.guild_id))
-                                await conn.commit()
-                            
-                            if old_rating and old_rating != self.rating_type:
-                                old_score = RATING_SCORES.get(old_rating, 0)
-                                await update_user_score(selected_user_id, display_name, -old_score, f"評級變更: {old_rating} → {self.rating_type}", self.guild_id)
-                                print(f"移除舊評級積分: {old_rating} (-{old_score}分)")
-                            
-                            new_score = RATING_SCORES.get(self.rating_type, 0)
-                            await update_user_rating(selected_user_id, self.rating_type, self.guild_id)
-                            
-                            if new_score != 0:
-                                await update_user_score(selected_user_id, display_name, new_score, f"活動評核: {self.rating_type}", self.guild_id)
-                                print(f"添加新評級積分: {self.rating_type} (+{new_score}分)")
-                            
-                            score_change = RATING_SCORES.get(self.rating_type, 0)
-                            score_text = f"（積分變動: {'+' if score_change > 0 else ''}{score_change}分）" if score_change != 0 else ""
-                            
-                            if old_rating and old_rating != self.rating_type:
-                                old_score = RATING_SCORES.get(old_rating, 0)
-                                result_text = f"已將 <@{selected_user_id}> ({display_name}) 的評級從 **{old_rating}** ({old_score}分) 變更為 **{self.rating_type}** {score_text}"
-                            else:
-                                result_text = f"已為 <@{selected_user_id}> ({display_name}) 評核：**{self.rating_type}** {score_text}"
-                            
-                            result_embed = discord.Embed(
-                                title="✅ 評核完成",
-                                description=result_text,
-                                color=discord.Color.green() if score_change >= 0 else discord.Color.red()
-                            )
-                            
-                            result_embed.add_field(name="評核者", value=interaction.user.mention, inline=True)
-                            result_embed.add_field(name="新評級", value=self.rating_type, inline=True)
-                            result_embed.add_field(name="積分變動", value=f"{score_change} 分", inline=True)
-                            
-                            await interaction.response.send_message(embed=result_embed)
-                            
-                            for child in self.children:
-                                child.disabled = True
-                            await interaction.message.edit(view=self)
+                        ratings = {}
+                        if result3 and result3['ratings']:
+                            ratings = result3['ratings']
                         
-                        select.callback = select_callback
-                        self.add_item(select)
-                
-                view = ParticipantSelectView(participants, event_id, rating_type, channel, bot, guild_id)
-                
-                select_message = await channel.send(f"<@{user_id}> 請選擇要評核為 **{rating_type}** 的參與者：", view=view)
-                print(f"已發送選擇視窗: message_id={select_message.id}")
-                return
-            
-            # 檢查是否是抽獎
-            async with conn.execute("""
-                SELECT id, participants, creator_id 
-                FROM giveaways 
-                WHERE message_id = ? AND is_active = 1 AND guild_id = ?
-            """, (payload.message_id, guild_id)) as cursor:
-                giveaway = await cursor.fetchone()
-            
-            if giveaway:
-                giveaway_id, participants_json, creator_id = giveaway
-                
-                if emoji == "🎫":
-                    participants = json.loads(participants_json) if participants_json else []
-                    
-                    if user_id not in participants:
-                        participants.append(user_id)
-                        await conn.execute("UPDATE giveaways SET participants = ? WHERE id = ? AND guild_id = ?", 
-                                         (json.dumps(participants), giveaway_id, guild_id))
-                        await conn.commit()
+                        old_rating = None
+                        if str(selected_user_id) in ratings and ratings[str(selected_user_id)]:
+                            old_rating = ratings[str(selected_user_id)][-1]["rating"] if ratings[str(selected_user_id)] else None
                         
-                        try:
-                            if message.embeds:
-                                embed = message.embeds[0]
-                                
-                                new_embed = discord.Embed(
-                                    title=embed.title,
-                                    description=embed.description,
-                                    color=embed.color
-                                )
-                                
-                                for field in embed.fields:
-                                    if field.name == "🎫 參與人數":
-                                        new_embed.add_field(
-                                            name="🎫 參與人數", 
-                                            value=f"{len(participants)} 人", 
-                                            inline=field.inline
-                                        )
-                                    else:
-                                        new_embed.add_field(
-                                            name=field.name, 
-                                            value=field.value, 
-                                            inline=field.inline
-                                        )
-                                
-                                if embed.footer:
-                                    new_embed.set_footer(text=embed.footer.text)
-                                
-                                await message.edit(embed=new_embed)
-                        except Exception as e:
-                            print(f"更新抽獎訊息錯誤: {e}")
-                
-                elif emoji == "⏹️" and user_id == creator_id:
-                    await end_giveaway(payload.message_id, manual=True, guild_id=guild_id)
-                    await channel.send(f"⏹️ 主辦人手動結束了抽獎！")
-                return
-            
-            # 檢查是否是活動簽到
-            async with conn.execute("""
-                SELECT id, participants, signup_end_time 
-                FROM evaluation_events 
-                WHERE signup_message_id = ? AND is_active = 1 AND guild_id = ?
-            """, (payload.message_id, guild_id)) as cursor:
-                signup_event = await cursor.fetchone()
-            
-            if signup_event and emoji == "✅":
-                event_id, participants_json, signup_end_time_str = signup_event
-                
-                try:
-                    if signup_end_time_str:
-                        try:
-                            signup_end_time = datetime.strptime(signup_end_time_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
-                        except:
-                            try:
-                                signup_end_time = datetime.strptime(signup_end_time_str, '%Y-%m-%d %H:%M:%S.%f')
-                            except:
-                                signup_end_time = None
-                    else:
-                        signup_end_time = None
+                        if str(selected_user_id) not in ratings:
+                            ratings[str(selected_user_id)] = []
+                        
+                        ratings[str(selected_user_id)].append({
+                            "rater": interaction.user.id,
+                            "rating": self.rating_type,
+                            "time": datetime.now().isoformat()
+                        })
+                        
+                        await db.execute(
+                            "UPDATE evaluation_events SET ratings = $1 WHERE id = $2 AND guild_id = $3",
+                            ratings, self.event_id, self.guild_id
+                        )
+                        
+                        if old_rating and old_rating != self.rating_type:
+                            old_score = RATING_SCORES.get(old_rating, 0)
+                            await update_user_score(selected_user_id, display_name, -old_score, f"評級變更: {old_rating} → {self.rating_type}", self.guild_id)
+                            print(f"移除舊評級積分: {old_rating} (-{old_score}分)")
+                        
+                        new_score = RATING_SCORES.get(self.rating_type, 0)
+                        await update_user_rating(selected_user_id, self.rating_type, self.guild_id)
+                        
+                        if new_score != 0:
+                            await update_user_score(selected_user_id, display_name, new_score, f"活動評核: {self.rating_type}", self.guild_id)
+                            print(f"添加新評級積分: {self.rating_type} (+{new_score}分)")
+                        
+                        score_change = RATING_SCORES.get(self.rating_type, 0)
+                        score_text = f"（積分變動: {'+' if score_change > 0 else ''}{score_change}分）" if score_change != 0 else ""
+                        
+                        if old_rating and old_rating != self.rating_type:
+                            old_score = RATING_SCORES.get(old_rating, 0)
+                            result_text = f"已將 <@{selected_user_id}> ({display_name}) 的評級從 **{old_rating}** ({old_score}分) 變更為 **{self.rating_type}** {score_text}"
+                        else:
+                            result_text = f"已為 <@{selected_user_id}> ({display_name}) 評核：**{self.rating_type}** {score_text}"
+                        
+                        result_embed = discord.Embed(
+                            title="✅ 評核完成",
+                            description=result_text,
+                            color=discord.Color.green() if score_change >= 0 else discord.Color.red()
+                        )
+                        
+                        result_embed.add_field(name="評核者", value=interaction.user.mention, inline=True)
+                        result_embed.add_field(name="新評級", value=self.rating_type, inline=True)
+                        result_embed.add_field(name="積分變動", value=f"{score_change} 分", inline=True)
+                        
+                        await interaction.response.send_message(embed=result_embed)
+                        
+                        for child in self.children:
+                            child.disabled = True
+                        await interaction.message.edit(view=self)
                     
-                    if signup_end_time and datetime.now() > signup_end_time:
-                        try:
-                            await message.remove_reaction("✅", payload.member)
-                            await channel.send(f"❌ <@{user_id}> 簽到時間已過！", delete_after=5)
-                        except:
-                            pass
-                        return
-                except Exception as time_error:
-                    print(f"時間解析錯誤: {time_error}")
-                
-                participants = json.loads(participants_json) if participants_json else []
-                
-                # 修復：檢查用戶是否已經簽到
+                    select.callback = select_callback
+                    self.add_item(select)
+            
+            view = ParticipantSelectView(participants, event_id, rating_type, channel, bot, guild_id)
+            
+            select_message = await channel.send(f"<@{user_id}> 請選擇要評核為 **{rating_type}** 的參與者：", view=view)
+            print(f"已發送選擇視窗: message_id={select_message.id}")
+            return
+        
+        # 檢查是否是抽獎
+        result = await db.fetchrow(
+            """
+            SELECT id, participants, creator_id 
+            FROM giveaways 
+            WHERE message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            payload.message_id, guild_id
+        )
+        
+        if result:
+            giveaway_id = result['id']
+            participants = result['participants'] or []
+            creator_id = result['creator_id']
+            
+            if emoji == "🎫":
                 if user_id not in participants:
                     participants.append(user_id)
+                    await db.execute(
+                        "UPDATE giveaways SET participants = $1 WHERE id = $2 AND guild_id = $3",
+                        participants, giveaway_id, guild_id
+                    )
                     
-                    # 更新資料庫中的參與者列表
-                    await conn.execute("UPDATE evaluation_events SET participants = ? WHERE id = ? AND guild_id = ?", 
-                                     (json.dumps(participants), event_id, guild_id))
-                    await conn.commit()
-                    
-                    print(f"✅ 用戶 {user_id} 成功簽到活動 {event_id}, 現在有 {len(participants)} 人簽到")
-                    
-                    # 更新訊息顯示
                     try:
                         if message.embeds:
                             embed = message.embeds[0]
@@ -2717,16 +2977,10 @@ async def on_raw_reaction_add(payload):
                             )
                             
                             for field in embed.fields:
-                                if field.name == "👥 已簽到":
+                                if field.name == "🎫 參與人數":
                                     new_embed.add_field(
-                                        name="👥 已簽到", 
+                                        name="🎫 參與人數", 
                                         value=f"{len(participants)} 人", 
-                                        inline=field.inline
-                                    )
-                                elif field.name == "⏱️ 剩餘時間":
-                                    new_embed.add_field(
-                                        name=field.name,
-                                        value=field.value,
                                         inline=field.inline
                                     )
                                 else:
@@ -2741,75 +2995,212 @@ async def on_raw_reaction_add(payload):
                             
                             await message.edit(embed=new_embed)
                     except Exception as e:
-                        print(f"更新簽到訊息錯誤: {e}")
+                        print(f"更新抽獎訊息錯誤: {e}")
+            
+            elif emoji == "⏹️" and user_id == creator_id:
+                await end_giveaway(payload.message_id, manual=True, guild_id=guild_id)
+                await channel.send(f"⏹️ 主辦人手動結束了抽獎！")
+            return
+        
+        # 檢查是否是活動簽到
+        result = await db.fetchrow(
+            """
+            SELECT id, participants, signup_end_time 
+            FROM evaluation_events 
+            WHERE signup_message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            payload.message_id, guild_id
+        )
+        
+        if result and emoji == "✅":
+            event_id = result['id']
+            participants = result['participants'] or []
+            signup_end_time_str = result['signup_end_time']
+            
+            try:
+                if signup_end_time_str:
+                    try:
+                        signup_end_time = signup_end_time_str
+                        if isinstance(signup_end_time_str, str):
+                            signup_end_time = datetime.strptime(signup_end_time_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
+                    except:
+                        signup_end_time = None
                 else:
-                    print(f"⚠️ 用戶 {user_id} 已經簽到過了")
-                return
-            
-            # 檢查是否是職業選擇
-            async with conn.execute("""
-                SELECT id, professions 
-                FROM evaluation_events 
-                WHERE profession_message_id = ? AND is_active = 1 AND guild_id = ?
-            """, (payload.message_id, guild_id)) as cursor:
-                profession_event = await cursor.fetchone()
-            
-            if profession_event and emoji in PROFESSION_EMOJIS:
-                event_id, professions_json = profession_event
-                profession_name = PROFESSION_EMOJIS[emoji]
+                    signup_end_time = None
                 
-                async with conn.execute("SELECT participants FROM evaluation_events WHERE id = ? AND guild_id = ?", (event_id, guild_id)) as cursor:
-                    result = await cursor.fetchone()
+                if signup_end_time and datetime.now() > signup_end_time:
+                    try:
+                        await message.remove_reaction("✅", payload.member)
+                        await channel.send(f"❌ <@{user_id}> 簽到時間已過！", delete_after=5)
+                    except:
+                        pass
+                    return
+            except Exception as time_error:
+                print(f"時間解析錯誤: {time_error}")
+            
+            # 修復：檢查用戶是否已經簽到
+            if user_id not in participants:
+                participants.append(user_id)
                 
-                if result and result[0]:
-                    participants = json.loads(result[0])
-                    
-                    if user_id in participants:
-                        professions = json.loads(professions_json) if professions_json else {}
+                # 更新資料庫中的參與者列表
+                await db.execute(
+                    "UPDATE evaluation_events SET participants = $1 WHERE id = $2 AND guild_id = $3",
+                    participants, event_id, guild_id
+                )
+                
+                print(f"✅ 用戶 {user_id} 成功簽到活動 {event_id}, 現在有 {len(participants)} 人簽到")
+                
+                # 更新訊息顯示
+                try:
+                    if message.embeds:
+                        embed = message.embeds[0]
                         
-                        if str(user_id) not in professions:
-                            professions[str(user_id)] = profession_name
-                            await conn.execute("UPDATE evaluation_events SET professions = ? WHERE id = ? AND guild_id = ?", 
-                                             (json.dumps(professions), event_id, guild_id))
-                            await conn.commit()
-                            
-                            await update_user_profession(user_id, profession_name, guild_id)
-                            
-                            try:
-                                bonus = PROFESSION_BONUS.get(profession_name, 0)
-                                bonus_text = f"（獲得職業加成：+{bonus}積分）" if bonus > 0 else ""
-                                await channel.send(f"✅ <@{user_id}> 已選擇職業：**{profession_name}**{bonus_text}", delete_after=5)
-                            except:
-                                pass
-                        else:
-                            try:
-                                await message.remove_reaction(emoji, payload.member)
-                                await channel.send(f"⚠️ <@{user_id}> 你已經選擇過職業了！", delete_after=5)
-                            except:
-                                pass
+                        new_embed = discord.Embed(
+                            title=embed.title,
+                            description=embed.description,
+                            color=embed.color
+                        )
+                        
+                        for field in embed.fields:
+                            if field.name == "👥 已簽到":
+                                new_embed.add_field(
+                                    name="👥 已簽到", 
+                                    value=f"{len(participants)} 人", 
+                                    inline=field.inline
+                                )
+                            elif field.name == "⏱️ 剩餘時間":
+                                new_embed.add_field(
+                                    name=field.name,
+                                    value=field.value,
+                                    inline=field.inline
+                                )
+                            else:
+                                new_embed.add_field(
+                                    name=field.name, 
+                                    value=field.value, 
+                                    inline=field.inline
+                                )
+                        
+                        if embed.footer:
+                            new_embed.set_footer(text=embed.footer.text)
+                        
+                        await message.edit(embed=new_embed)
+                except Exception as e:
+                    print(f"更新簽到訊息錯誤: {e}")
+            else:
+                print(f"⚠️ 用戶 {user_id} 已經簽到過了")
+            return
+        
+        # 檢查是否是職業選擇
+        result = await db.fetchrow(
+            """
+            SELECT id, professions 
+            FROM evaluation_events 
+            WHERE profession_message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            payload.message_id, guild_id
+        )
+        
+        if result and emoji in PROFESSION_EMOJIS:
+            event_id = result['id']
+            professions = result['professions'] or {}
+            profession_name = PROFESSION_EMOJIS[emoji]
+            
+            result2 = await db.fetchrow(
+                "SELECT participants FROM evaluation_events WHERE id = $1 AND guild_id = $2",
+                event_id, guild_id
+            )
+            
+            if result2 and result2['participants']:
+                participants = result2['participants']
+                
+                if user_id in participants:
+                    if str(user_id) not in professions:
+                        professions[str(user_id)] = profession_name
+                        await db.execute(
+                            "UPDATE evaluation_events SET professions = $1 WHERE id = $2 AND guild_id = $3",
+                            professions, event_id, guild_id
+                        )
+                        
+                        await update_user_profession(user_id, profession_name, guild_id)
+                        
+                        try:
+                            bonus = PROFESSION_BONUS.get(profession_name, 0)
+                            bonus_text = f"（獲得職業加成：+{bonus}積分）" if bonus > 0 else ""
+                            await channel.send(f"✅ <@{user_id}> 已選擇職業：**{profession_name}**{bonus_text}", delete_after=5)
+                        except:
+                            pass
                     else:
                         try:
                             await message.remove_reaction(emoji, payload.member)
-                            await channel.send(f"❌ <@{user_id}> 請先簽到再選擇職業！", delete_after=5)
+                            await channel.send(f"⚠️ <@{user_id}> 你已經選擇過職業了！", delete_after=5)
                         except:
                             pass
-                return
+                else:
+                    try:
+                        await message.remove_reaction(emoji, payload.member)
+                        await channel.send(f"❌ <@{user_id}> 請先簽到再選擇職業！", delete_after=5)
+                    except:
+                        pass
+            return
             
     except Exception as e:
         print(f"處理反應錯誤: {e}")
         import traceback
         traceback.print_exc()
 
+# ========== 機器人上線 ==========
+
+@bot.event
+async def on_ready():
+    """機器人上線"""
+    print(f"\n{'='*60}")
+    print(f"🤖 {BOT_NAME} - PostgreSQL 版本已上線")
+    print(f"📊 伺服器數量: {len(bot.guilds)}")
+    print(f"{'='*60}")
+    
+    # 連接 PostgreSQL
+    success = await db.connect()
+    if not success:
+        print("⚠️ PostgreSQL 連接失敗，機器人將繼續運行但數據可能不會保存")
+    
+    try:
+        print("\n🔄 正在同步指令...")
+        global_synced = await tree.sync()
+        print(f"✅ 已同步 {len(global_synced)} 個指令")
+        
+        print("\n📋 新增功能:")
+        print("  • /blessing - 測試運程功能")
+        print("  • 聊天積分系統 - 每句 +5 分，每日上限 20 分")
+        print("  • PostgreSQL 數據持久化")
+        print("  • 獎品增減功能修復")
+        
+        print("\n📊 可用指令 (14個):")
+        for cmd in global_synced:
+            print(f"  • /{cmd.name} - {cmd.description}")
+        
+    except Exception as e:
+        print(f"❌ 同步失敗: {e}")
+    
+    await bot.change_presence(
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="/help 查看14個指令"
+        )
+    )
+    
+    print(f"\n🎮 機器人準備就緒！指令數: 14")
+
 # ========== 主程式 ==========
 
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - 13指令完整版本（修復簽到問題）")
-    print(f"💡 主要指令: 使用 / 前綴")
+    print(f"🚀 啟動 {BOT_NAME} - PostgreSQL 持久化版本")
+    print(f"💡 新增功能：測試運程、聊天積分")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
-    print(f"📁 資料庫位置: {DB_NAME}")
-    print(f"📊 指令數量: 13個 (9用戶 + 4管理員)")
+    print(f"🗄️ 資料庫: PostgreSQL (Railway)")
+    print(f"📊 指令數量: 14個 (10用戶 + 4管理員)")
     print(f"{'='*50}")
     
     token = os.getenv("DISCORD_TOKEN")
