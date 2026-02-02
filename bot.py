@@ -91,7 +91,7 @@ class Database:
         """連接 PostgreSQL 資料庫"""
         try:
             # Railway 會自動提供 DATABASE_URL 環境變數
-            database_url = os.getenv('DATABASE_URL')
+            database_url = postgresql://postgres:BIEujYDJsMzjxINEeSwUTeTFTFVHBOzh@postgres.railway.internal:5432/railway
             
             if not database_url:
                 print("⚠️ 找不到 DATABASE_URL，將無法保存數據！")
@@ -3227,3 +3227,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
