@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-小雲ALBION機械人 - PostgreSQL完整版本（數據持久化）
+小雲ALBION機械人 - PostgreSQL完整版本（數據持久化）修正版
 包含所有13個原指令 + 新增/blessing指令 + 聊天積分系統
 修復獎品增減功能，使用Railway PostgreSQL
+完整功能版本（不刪減）
 """
 
 import os
@@ -19,6 +20,8 @@ from typing import Optional, List, Literal
 import time
 import asyncpg  # PostgreSQL
 from dotenv import load_dotenv
+import traceback
+import aiosqlite  # 添加 SQLite 支持作為備份
 
 # 載入環境變數
 load_dotenv()
@@ -86,177 +89,327 @@ tree = bot.tree
 class Database:
     def __init__(self):
         self.pool = None
+        self.is_connected = False
+        self.connection_attempts = 0
     
     async def connect(self):
         """連接 PostgreSQL 資料庫"""
+        self.connection_attempts += 1
+        print(f"\n🔄 連接 PostgreSQL (嘗試 {self.connection_attempts})...")
+        
         try:
             # Railway 會自動提供 DATABASE_URL 環境變數
             database_url = os.getenv('DATABASE_URL')
             
+            print(f"🔍 DATABASE_URL 是否存在: {'✅' if database_url else '❌'}")
+            
             if not database_url:
                 print("⚠️ 找不到 DATABASE_URL，將無法保存數據！")
+                print("💡 請在 Railway 設定環境變數：")
+                print("   1. 進入 Railway 專案")
+                print("   2. 點擊 Settings")
+                print("   3. 點擊 Variables")
+                print("   4. 新增 DATABASE_URL = 你的_postgresql_url")
                 return False
+            
+            # 顯示 DATABASE_URL（隱藏密碼）
+            if '@' in database_url:
+                safe_url = database_url.split('@')[0] + '@' + database_url.split('@')[1].split('/')[0] + '/***'
+                print(f"🔍 DATABASE_URL: {safe_url}")
+            else:
+                print(f"🔍 DATABASE_URL: {database_url[:50]}...")
             
             # 修正URL格式
             if database_url.startswith('postgres://'):
                 database_url = database_url.replace('postgres://', 'postgresql://', 1)
+                print(f"🔧 已修正 URL 格式: {database_url[:50]}...")
             
-            print(f"🔄 正在連接 PostgreSQL...")
+            # 設置連線超時和重試
+            print("🔄 正在建立連線池...")
             self.pool = await asyncpg.create_pool(
                 database_url, 
-                min_size=5, 
-                max_size=20,
-                command_timeout=60
+                min_size=1, 
+                max_size=5,
+                command_timeout=30,
+                max_inactive_connection_lifetime=300,
+                server_settings={
+                    'client_encoding': 'utf8',
+                    'application_name': 'discord_bot'
+                }
             )
             
+            # 測試連接
+            print("🔧 測試連線...")
+            async with self.pool.acquire() as conn:
+                result = await conn.fetchval('SELECT 1')
+                if result == 1:
+                    print("✅ PostgreSQL 連接測試成功")
+                else:
+                    print("❌ PostgreSQL 連接測試失敗")
+                    return False
+            
             await self.init_db()
-            print("✅ PostgreSQL 連接成功")
+            self.is_connected = True
+            print("✅ PostgreSQL 連接成功並初始化完成")
             return True
             
         except Exception as e:
             print(f"❌ PostgreSQL 連接失敗: {e}")
+            print("💡 可能原因：")
+            print("   1. DATABASE_URL 格式錯誤")
+            print("   2. PostgreSQL 服務未啟動")
+            print("   3. 網路連接問題")
+            print("   4. 權限不足")
+            traceback.print_exc()
             return False
     
     async def init_db(self):
         """初始化資料庫表格"""
-        async with self.pool.acquire() as conn:
-            # users 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT NOT NULL,
-                    guild_id BIGINT NOT NULL,
-                    username TEXT,
-                    current_score INTEGER DEFAULT 0,
-                    total_score INTEGER DEFAULT 0,
-                    join_date TIMESTAMP DEFAULT NOW(),
-                    last_active TIMESTAMP DEFAULT NOW(),
-                    last_chat_date DATE,
-                    daily_chat_score INTEGER DEFAULT 0,
-                    profession_counts JSONB DEFAULT '{}',
-                    activity_stats JSONB DEFAULT '{}',
-                    rating_stats JSONB DEFAULT '{}',
-                    PRIMARY KEY (user_id, guild_id)
-                )
-            ''')
-            
-            # prize_pool 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS prize_pool (
-                    id SERIAL PRIMARY KEY,
-                    prize_name TEXT NOT NULL,
-                    box_level TEXT NOT NULL,
-                    quantity INTEGER DEFAULT 1,
-                    remaining INTEGER DEFAULT 1,
-                    added_by BIGINT,
-                    added_at TIMESTAMP DEFAULT NOW(),
-                    guild_id BIGINT DEFAULT 0,
-                    UNIQUE(prize_name, box_level, guild_id)
-                )
-            ''')
-            
-            # giveaways 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS giveaways (
-                    id SERIAL PRIMARY KEY,
-                    creator_id BIGINT,
-                    prize TEXT,
-                    winner_count INTEGER DEFAULT 1,
-                    participants JSONB DEFAULT '[]',
-                    winners JSONB DEFAULT '[]',
-                    end_time TIMESTAMP,
-                    message_id BIGINT,
-                    channel_id BIGINT,
-                    is_active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    guild_id BIGINT DEFAULT 0
-                )
-            ''')
-            
-            # score_draws 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS score_draws (
-                    id SERIAL PRIMARY KEY,
-                    creator_id BIGINT,
-                    score_cost INTEGER,
-                    box_level TEXT,
-                    participants JSONB DEFAULT '[]',
-                    winner_prize TEXT,
-                    winner_id BIGINT,
-                    is_active BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP DEFAULT NOW(),
-                    guild_id BIGINT DEFAULT 0
-                )
-            ''')
-            
-            # score_transfers 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS score_transfers (
-                    id SERIAL PRIMARY KEY,
-                    from_user_id BIGINT,
-                    to_user_id BIGINT,
-                    amount INTEGER,
-                    reason TEXT,
-                    timestamp TIMESTAMP DEFAULT NOW(),
-                    guild_id BIGINT DEFAULT 0
-                )
-            ''')
-            
-            # evaluation_events 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS evaluation_events (
-                    id SERIAL PRIMARY KEY,
-                    event_name TEXT,
-                    creator_id BIGINT,
-                    signup_message_id BIGINT,
-                    profession_message_id BIGINT,
-                    rating_message_id BIGINT,
-                    channel_id BIGINT,
-                    participants JSONB DEFAULT '[]',
-                    default_rated JSONB DEFAULT '[]',
-                    professions JSONB DEFAULT '{}',
-                    ratings JSONB DEFAULT '{}',
-                    is_active BOOLEAN DEFAULT true,
-                    start_time TIMESTAMP DEFAULT NOW(),
-                    signup_end_time TIMESTAMP,
-                    guild_id BIGINT DEFAULT 0
-                )
-            ''')
-            
-            # query_logs 表格
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS query_logs (
-                    id SERIAL PRIMARY KEY,
-                    query_type TEXT,
-                    user_id BIGINT,
-                    parameters JSONB,
-                    timestamp TIMESTAMP DEFAULT NOW(),
-                    guild_id BIGINT DEFAULT 0
-                )
-            ''')
-            
+        try:
+            async with self.pool.acquire() as conn:
+                # users 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS users (
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL,
+                        username TEXT,
+                        current_score INTEGER DEFAULT 0,
+                        total_score INTEGER DEFAULT 0,
+                        join_date TIMESTAMP DEFAULT NOW(),
+                        last_active TIMESTAMP DEFAULT NOW(),
+                        last_chat_date DATE,
+                        daily_chat_score INTEGER DEFAULT 0,
+                        profession_counts JSONB DEFAULT '{}',
+                        activity_stats JSONB DEFAULT '{}',
+                        rating_stats JSONB DEFAULT '{}',
+                        PRIMARY KEY (user_id, guild_id)
+                    )
+                ''')
+                
+                # prize_pool 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS prize_pool (
+                        id SERIAL PRIMARY KEY,
+                        prize_name TEXT NOT NULL,
+                        box_level TEXT NOT NULL,
+                        quantity INTEGER DEFAULT 1,
+                        remaining INTEGER DEFAULT 1,
+                        added_by BIGINT,
+                        added_at TIMESTAMP DEFAULT NOW(),
+                        guild_id BIGINT DEFAULT 0,
+                        UNIQUE(prize_name, box_level, guild_id)
+                    )
+                ''')
+                
+                # giveaways 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS giveaways (
+                        id SERIAL PRIMARY KEY,
+                        creator_id BIGINT,
+                        prize TEXT,
+                        winner_count INTEGER DEFAULT 1,
+                        participants JSONB DEFAULT '[]',
+                        winners JSONB DEFAULT '[]',
+                        end_time TIMESTAMP,
+                        message_id BIGINT,
+                        channel_id BIGINT,
+                        is_active BOOLEAN DEFAULT true,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        guild_id BIGINT DEFAULT 0
+                    )
+                ''')
+                
+                # score_draws 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS score_draws (
+                        id SERIAL PRIMARY KEY,
+                        creator_id BIGINT,
+                        score_cost INTEGER,
+                        box_level TEXT,
+                        participants JSONB DEFAULT '[]',
+                        winner_prize TEXT,
+                        winner_id BIGINT,
+                        is_active BOOLEAN DEFAULT true,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        guild_id BIGINT DEFAULT 0
+                    )
+                ''')
+                
+                # score_transfers 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS score_transfers (
+                        id SERIAL PRIMARY KEY,
+                        from_user_id BIGINT,
+                        to_user_id BIGINT,
+                        amount INTEGER,
+                        reason TEXT,
+                        timestamp TIMESTAMP DEFAULT NOW(),
+                        guild_id BIGINT DEFAULT 0
+                    )
+                ''')
+                
+                # evaluation_events 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS evaluation_events (
+                        id SERIAL PRIMARY KEY,
+                        event_name TEXT,
+                        creator_id BIGINT,
+                        signup_message_id BIGINT,
+                        profession_message_id BIGINT,
+                        rating_message_id BIGINT,
+                        channel_id BIGINT,
+                        participants JSONB DEFAULT '[]',
+                        default_rated JSONB DEFAULT '[]',
+                        professions JSONB DEFAULT '{}',
+                        ratings JSONB DEFAULT '{}',
+                        is_active BOOLEAN DEFAULT true,
+                        start_time TIMESTAMP DEFAULT NOW(),
+                        signup_end_time TIMESTAMP,
+                        guild_id BIGINT DEFAULT 0
+                    )
+                ''')
+                
+                # query_logs 表格
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS query_logs (
+                        id SERIAL PRIMARY KEY,
+                        query_type TEXT,
+                        user_id BIGINT,
+                        parameters JSONB,
+                        timestamp TIMESTAMP DEFAULT NOW(),
+                        guild_id BIGINT DEFAULT 0
+                    )
+                ''')
+                
             print("✅ 資料庫表格初始化完成")
+            return True
+            
+        except Exception as e:
+            print(f"❌ 資料庫初始化失敗: {e}")
+            traceback.print_exc()
+            return False
     
     async def execute(self, query, *args):
         """執行 SQL 查詢"""
-        async with self.pool.acquire() as conn:
-            return await conn.execute(query, *args)
+        if not self.pool or not self.is_connected:
+            print(f"⚠️ 資料庫未連接，跳過執行: {query[:50]}...")
+            return None
+        
+        try:
+            async with self.pool.acquire() as conn:
+                result = await conn.execute(query, *args)
+                return result
+        except Exception as e:
+            print(f"❌ 執行查詢失敗: {e}")
+            print(f"   查詢: {query[:100]}...")
+            traceback.print_exc()
+            return None
     
     async def fetch(self, query, *args):
         """執行查詢並返回結果"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetch(query, *args)
+        if not self.pool or not self.is_connected:
+            print(f"⚠️ 資料庫未連接，返回空列表: {query[:50]}...")
+            return []
+        
+        try:
+            async with self.pool.acquire() as conn:
+                return await conn.fetch(query, *args)
+        except Exception as e:
+            print(f"❌ 查詢失敗: {e}")
+            print(f"   查詢: {query[:100]}...")
+            traceback.print_exc()
+            return []
     
     async def fetchrow(self, query, *args):
         """執行查詢並返回單行結果"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetchrow(query, *args)
+        if not self.pool or not self.is_connected:
+            print(f"⚠️ 資料庫未連接，返回 None: {query[:50]}...")
+            return None
+        
+        try:
+            async with self.pool.acquire() as conn:
+                return await conn.fetchrow(query, *args)
+        except Exception as e:
+            print(f"❌ 查詢失敗: {e}")
+            print(f"   查詢: {query[:100]}...")
+            traceback.print_exc()
+            return None
     
     async def fetchval(self, query, *args):
         """執行查詢並返回單個值"""
-        async with self.pool.acquire() as conn:
-            return await conn.fetchval(query, *args)
+        if not self.pool or not self.is_connected:
+            print(f"⚠️ 資料庫未連接，返回 None: {query[:50]}...")
+            return None
+        
+        try:
+            async with self.pool.acquire() as conn:
+                return await conn.fetchval(query, *args)
+        except Exception as e:
+            print(f"❌ 查詢失敗: {e}")
+            print(f"   查詢: {query[:100]}...")
+            traceback.print_exc()
+            return None
 
 db = Database()
+
+# ========== 記憶體緩存（當資料庫失敗時使用）==========
+class MemoryCache:
+    def __init__(self):
+        self.user_scores = {}  # {user_id_guild_id: {"current": score, "total": score}}
+        self.user_profiles = {}  # {user_id_guild_id: profile_data}
+        self.chat_scores = {}  # {user_id_guild_id: {"date": date, "score": score}}
+        self.prizes = []  # 獎品列表
+        self.giveaways = []  # 抽獎列表
+        self.events = []  # 活動列表
+        
+        print("📝 記憶體緩存已初始化")
+    
+    def get_key(self, user_id, guild_id=0):
+        """獲取緩存鍵值"""
+        return f"{user_id}_{guild_id}"
+    
+    async def get_user_score(self, user_id, guild_id=0):
+        """從緩存取得用戶積分"""
+        key = self.get_key(user_id, guild_id)
+        if key in self.user_scores:
+            data = self.user_scores[key]
+            return data.get("current", 0), data.get("total", 0)
+        return 0, 0
+    
+    async def update_user_score(self, user_id, username, amount, reason="", guild_id=0):
+        """在緩存中更新用戶積分"""
+        key = self.get_key(user_id, guild_id)
+        if key not in self.user_scores:
+            self.user_scores[key] = {"current": 0, "total": 0, "username": username}
+        
+        self.user_scores[key]["current"] += amount
+        if amount > 0:
+            self.user_scores[key]["total"] += amount
+        
+        print(f"📝 記憶體緩存: {username} {amount:+d}，目前積分: {self.user_scores[key]['current']}，原因: {reason}")
+        return True
+    
+    async def get_user_profile(self, user_id, guild_id=0):
+        """從緩存取得用戶資料"""
+        key = self.get_key(user_id, guild_id)
+        if key in self.user_profiles:
+            return self.user_profiles[key]
+        
+        # 創建默認資料
+        default_profile = {
+            'user_id': user_id,
+            'current_score': 0,
+            'total_score': 0,
+            'join_date': datetime.now().strftime('%Y-%m-%d'),
+            'profession_counts': {},
+            'activity_stats': {},
+            'rating_stats': {}
+        }
+        
+        self.user_profiles[key] = default_profile
+        return default_profile
+
+memory_cache = MemoryCache()
 
 # ========== 通用函數 ==========
 
@@ -270,152 +423,203 @@ def get_guild_id(interaction_or_context):
 
 async def get_user_score(user_id, guild_id=0):
     """取得用戶積分"""
-    result = await db.fetchrow(
-        "SELECT current_score, total_score FROM users WHERE user_id = $1 AND guild_id = $2",
-        user_id, guild_id
-    )
-    
-    if result:
-        return result['current_score'], result['total_score']
-    return 0, 0
-
-async def update_user_score(user_id, username, amount, reason="", guild_id=0):
-    """更新用戶積分"""
-    try:
-        # 先檢查用戶是否已存在
-        existing = await db.fetchrow(
-            "SELECT user_id FROM users WHERE user_id = $1 AND guild_id = $2",
+    if db.is_connected:
+        result = await db.fetchrow(
+            "SELECT current_score, total_score FROM users WHERE user_id = $1 AND guild_id = $2",
             user_id, guild_id
         )
         
-        if not existing:
-            # 用戶不存在，插入新用戶
-            current_score = max(amount, 0)
-            total_score = max(amount, 0)
-            await db.execute(
-                "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
-                user_id, username, current_score, total_score, guild_id
+        if result:
+            return result['current_score'], result['total_score']
+        return 0, 0
+    else:
+        # 使用記憶體緩存
+        return await memory_cache.get_user_score(user_id, guild_id)
+
+async def update_user_score(user_id, username, amount, reason="", guild_id=0):
+    """更新用戶積分"""
+    if db.is_connected:
+        try:
+            # 先檢查用戶是否已存在
+            existing = await db.fetchrow(
+                "SELECT user_id FROM users WHERE user_id = $1 AND guild_id = $2",
+                user_id, guild_id
             )
-        else:
-            # 用戶存在，更新積分
-            if amount > 0:
+            
+            if not existing:
+                # 用戶不存在，插入新用戶
+                current_score = max(amount, 0)
+                total_score = max(amount, 0)
                 await db.execute(
-                    "UPDATE users SET current_score = current_score + $1, total_score = total_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
-                    amount, user_id, guild_id
+                    "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                    user_id, username, current_score, total_score, guild_id
                 )
             else:
+                # 用戶存在，更新積分
+                if amount > 0:
+                    await db.execute(
+                        "UPDATE users SET current_score = current_score + $1, total_score = total_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
+                        amount, user_id, guild_id
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE users SET current_score = current_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
+                        amount, user_id, guild_id
+                    )
+            
+            # 記錄積分變動
+            if amount != 0:
+                from_user_id = user_id if amount < 0 else None
+                to_user_id = user_id if amount > 0 else None
+                reason_text = reason if reason else ("系統扣除" if amount < 0 else "系統增加")
+                
                 await db.execute(
-                    "UPDATE users SET current_score = current_score + $1, last_active = NOW() WHERE user_id = $2 AND guild_id = $3",
-                    amount, user_id, guild_id
+                    "INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                    from_user_id, to_user_id, abs(amount), reason_text, guild_id
                 )
-        
-        # 記錄積分變動
-        if amount != 0:
-            from_user_id = user_id if amount < 0 else None
-            to_user_id = user_id if amount > 0 else None
-            reason_text = reason if reason else ("系統扣除" if amount < 0 else "系統增加")
             
-            await db.execute(
-                "INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id) VALUES ($1, $2, $3, $4, $5)",
-                from_user_id, to_user_id, abs(amount), reason_text, guild_id
-            )
+            return True
             
-    except Exception as e:
-        print(f"更新用戶積分錯誤: {e}")
+        except Exception as e:
+            print(f"❌ 資料庫更新用戶積分錯誤: {e}")
+            # 資料庫失敗時使用記憶體緩存
+            return await memory_cache.update_user_score(user_id, username, amount, reason, guild_id)
+    else:
+        # 使用記憶體緩存
+        return await memory_cache.update_user_score(user_id, username, amount, reason, guild_id)
 
 async def add_chat_score(user_id, username, guild_id=0):
     """添加聊天積分"""
     try:
         today = datetime.now().date()
         
-        # 檢查用戶記錄
-        result = await db.fetchrow(
-            "SELECT last_chat_date, daily_chat_score FROM users WHERE user_id = $1 AND guild_id = $2",
-            user_id, guild_id
-        )
-        
-        if not result:
-            # 新用戶，創建記錄
-            await db.execute(
-                "INSERT INTO users (user_id, username, last_chat_date, daily_chat_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
-                user_id, username, today, CHAT_SCORE, guild_id
+        if db.is_connected:
+            # 檢查用戶記錄
+            result = await db.fetchrow(
+                "SELECT last_chat_date, daily_chat_score FROM users WHERE user_id = $1 AND guild_id = $2",
+                user_id, guild_id
             )
-            await update_user_score(user_id, username, CHAT_SCORE, "聊天積分", guild_id)
-            return CHAT_SCORE, DAILY_CHAT_LIMIT
             
-        else:
-            last_chat_date = result['last_chat_date']
-            daily_chat_score = result['daily_chat_score'] or 0
-            
-            # 如果是新的一天，重置計數
-            if last_chat_date != today:
-                daily_chat_score = CHAT_SCORE
+            if not result:
+                # 新用戶，創建記錄
                 await db.execute(
-                    "UPDATE users SET last_chat_date = $1, daily_chat_score = $2 WHERE user_id = $3 AND guild_id = $4",
-                    today, daily_chat_score, user_id, guild_id
+                    "INSERT INTO users (user_id, username, last_chat_date, daily_chat_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                    user_id, username, today, CHAT_SCORE, guild_id
                 )
                 await update_user_score(user_id, username, CHAT_SCORE, "聊天積分", guild_id)
                 return CHAT_SCORE, DAILY_CHAT_LIMIT
+                
             else:
-                # 檢查是否已達上限
-                if daily_chat_score >= DAILY_CHAT_LIMIT:
-                    return 0, DAILY_CHAT_LIMIT
+                last_chat_date = result['last_chat_date']
+                daily_chat_score = result['daily_chat_score'] or 0
                 
-                # 添加積分
-                new_score = min(daily_chat_score + CHAT_SCORE, DAILY_CHAT_LIMIT)
-                added_score = new_score - daily_chat_score
-                
-                await db.execute(
-                    "UPDATE users SET daily_chat_score = $1 WHERE user_id = $2 AND guild_id = $3",
-                    new_score, user_id, guild_id
-                )
-                
-                if added_score > 0:
-                    await update_user_score(user_id, username, added_score, "聊天積分", guild_id)
-                
-                return added_score, DAILY_CHAT_LIMIT
+                # 如果是新的一天，重置計數
+                if last_chat_date != today:
+                    daily_chat_score = CHAT_SCORE
+                    await db.execute(
+                        "UPDATE users SET last_chat_date = $1, daily_chat_score = $2 WHERE user_id = $3 AND guild_id = $4",
+                        today, daily_chat_score, user_id, guild_id
+                    )
+                    await update_user_score(user_id, username, CHAT_SCORE, "聊天積分", guild_id)
+                    return CHAT_SCORE, DAILY_CHAT_LIMIT
+                else:
+                    # 檢查是否已達上限
+                    if daily_chat_score >= DAILY_CHAT_LIMIT:
+                        return 0, DAILY_CHAT_LIMIT
+                    
+                    # 添加積分
+                    new_score = min(daily_chat_score + CHAT_SCORE, DAILY_CHAT_LIMIT)
+                    added_score = new_score - daily_chat_score
+                    
+                    await db.execute(
+                        "UPDATE users SET daily_chat_score = $1 WHERE user_id = $2 AND guild_id = $3",
+                        new_score, user_id, guild_id
+                    )
+                    
+                    if added_score > 0:
+                        await update_user_score(user_id, username, added_score, "聊天積分", guild_id)
+                    
+                    return added_score, DAILY_CHAT_LIMIT
+        else:
+            # 使用記憶體緩存
+            # 簡化處理：每次聊天都給積分，直到達到上限
+            current_score, total_score = await get_user_score(user_id, guild_id)
+            if current_score >= DAILY_CHAT_LIMIT:
+                return 0, DAILY_CHAT_LIMIT
+            
+            added_score = min(CHAT_SCORE, DAILY_CHAT_LIMIT - current_score)
+            await update_user_score(user_id, username, added_score, "聊天積分", guild_id)
+            return added_score, DAILY_CHAT_LIMIT
                 
     except Exception as e:
-        print(f"添加聊天積分錯誤: {e}")
+        print(f"❌ 添加聊天積分錯誤: {e}")
+        traceback.print_exc()
         return 0, DAILY_CHAT_LIMIT
 
 async def get_user_profile(user_id, guild_id=0):
-    """獲取用戶完整資料"""
-    result = await db.fetchrow(
-        "SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
-        user_id, guild_id
-    )
-    
-    if result:
-        current_score = result['current_score']
-        total_score = result['total_score']
-        join_date = result['join_date']
-        profession_counts = result['profession_counts'] or {}
-        activity_stats = result['activity_stats'] or {}
-        rating_stats = result['rating_stats'] or {}
+    """獲取用戶完整資料（修正JSON解析問題）"""
+    if db.is_connected:
+        result = await db.fetchrow(
+            "SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
+            user_id, guild_id
+        )
         
-        try:
-            if isinstance(join_date, str):
-                join_date_str = datetime.strptime(join_date.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')
-            else:
-                join_date_str = join_date.strftime('%Y-%m-%d')
-        except:
-            join_date_str = str(join_date)
-        
-        return {
-            'user_id': user_id,
-            'current_score': current_score,
-            'total_score': total_score,
-            'join_date': join_date_str,
-            'profession_counts': profession_counts,
-            'activity_stats': activity_stats,
-            'rating_stats': rating_stats
-        }
+        if result:
+            current_score = result['current_score'] or 0
+            total_score = result['total_score'] or 0
+            join_date = result['join_date']
+            
+            # 修正：確保 JSON 數據是字典而不是字符串
+            profession_counts = result['profession_counts']
+            activity_stats = result['activity_stats']
+            rating_stats = result['rating_stats']
+            
+            # 處理 JSON 數據
+            def parse_json_data(data):
+                if data is None:
+                    return {}
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, str):
+                    try:
+                        return json.loads(data)
+                    except:
+                        return {}
+                return {}
+            
+            profession_counts = parse_json_data(profession_counts)
+            activity_stats = parse_json_data(activity_stats)
+            rating_stats = parse_json_data(rating_stats)
+            
+            try:
+                if isinstance(join_date, str):
+                    join_date_str = datetime.strptime(join_date.split('.')[0], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')
+                else:
+                    join_date_str = join_date.strftime('%Y-%m-%d')
+            except:
+                join_date_str = str(join_date)
+            
+            return {
+                'user_id': user_id,
+                'current_score': current_score,
+                'total_score': total_score,
+                'join_date': join_date_str,
+                'profession_counts': profession_counts,
+                'activity_stats': activity_stats,
+                'rating_stats': rating_stats
+            }
+    else:
+        # 使用記憶體緩存
+        return await memory_cache.get_user_profile(user_id, guild_id)
     
     return None
 
 async def update_user_profession(user_id, profession, guild_id=0):
     """更新用戶職業統計"""
+    if not db.is_connected:
+        print(f"⚠️ 資料庫未連接，跳過更新職業統計: {user_id}")
+        return
+    
     try:
         result = await db.fetchrow(
             "SELECT profession_counts, username FROM users WHERE user_id = $1 AND guild_id = $2",
@@ -425,6 +629,13 @@ async def update_user_profession(user_id, profession, guild_id=0):
         if result:
             profession_counts = result['profession_counts'] or {}
             username = result['username']
+            
+            # 解析 JSON 數據
+            if isinstance(profession_counts, str):
+                try:
+                    profession_counts = json.loads(profession_counts)
+                except:
+                    profession_counts = {}
             
             profession_str = profession
             if profession_str in profession_counts:
@@ -438,14 +649,18 @@ async def update_user_profession(user_id, profession, guild_id=0):
             
             await db.execute(
                 "UPDATE users SET profession_counts = $1 WHERE user_id = $2 AND guild_id = $3",
-                profession_counts, user_id, guild_id
+                json.dumps(profession_counts), user_id, guild_id
             )
             
     except Exception as e:
-        print(f"更新職業統計錯誤: {e}")
+        print(f"❌ 更新職業統計錯誤: {e}")
 
 async def update_user_activity(user_id, event_name, attended=True, guild_id=0):
     """更新用戶活動統計"""
+    if not db.is_connected:
+        print(f"⚠️ 資料庫未連接，跳過更新活動統計: {user_id}")
+        return
+    
     try:
         result = await db.fetchrow(
             "SELECT activity_stats FROM users WHERE user_id = $1 AND guild_id = $2",
@@ -454,6 +669,13 @@ async def update_user_activity(user_id, event_name, attended=True, guild_id=0):
         
         if result:
             activity_stats = result['activity_stats'] or {}
+            
+            # 解析 JSON 數據
+            if isinstance(activity_stats, str):
+                try:
+                    activity_stats = json.loads(activity_stats)
+                except:
+                    activity_stats = {}
             
             # 獲取當前半月期
             now = datetime.now()
@@ -470,14 +692,18 @@ async def update_user_activity(user_id, event_name, attended=True, guild_id=0):
             
             await db.execute(
                 "UPDATE users SET activity_stats = $1 WHERE user_id = $2 AND guild_id = $3",
-                activity_stats, user_id, guild_id
+                json.dumps(activity_stats), user_id, guild_id
             )
             
     except Exception as e:
-        print(f"更新活動統計錯誤: {e}")
+        print(f"❌ 更新活動統計錯誤: {e}")
 
 async def update_user_rating(user_id, rating_type, guild_id=0):
     """更新用戶評核統計"""
+    if not db.is_connected:
+        print(f"⚠️ 資料庫未連接，跳過更新評核統計: {user_id}")
+        return
+    
     try:
         result = await db.fetchrow(
             "SELECT rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
@@ -486,6 +712,13 @@ async def update_user_rating(user_id, rating_type, guild_id=0):
         
         if result:
             rating_stats = result['rating_stats'] or {}
+            
+            # 解析 JSON 數據
+            if isinstance(rating_stats, str):
+                try:
+                    rating_stats = json.loads(rating_stats)
+                except:
+                    rating_stats = {}
             
             rating_str = rating_type
             if rating_str in rating_stats:
@@ -511,11 +744,11 @@ async def update_user_rating(user_id, rating_type, guild_id=0):
             
             await db.execute(
                 "UPDATE users SET rating_stats = $1 WHERE user_id = $2 AND guild_id = $3",
-                rating_stats, user_id, guild_id
+                json.dumps(rating_stats), user_id, guild_id
             )
             
     except Exception as e:
-        print(f"更新評核統計錯誤: {e}")
+        print(f"❌ 更新評核統計錯誤: {e}")
 
 def get_current_half_month():
     """獲取當前半月期"""
@@ -530,6 +763,9 @@ def get_current_half_month():
 
 async def get_total_events_in_period(guild_id=0, period: str = "current"):
     """獲取指定期間內的總活動數"""
+    if not db.is_connected:
+        return 0
+    
     if period == "current":
         # 計算當前半月期內的總活動數
         current_period = get_current_half_month()
@@ -544,6 +780,12 @@ async def get_total_events_in_period(guild_id=0, period: str = "current"):
         
         for row in results:
             activity_stats = row['activity_stats'] or {}
+            if isinstance(activity_stats, str):
+                try:
+                    activity_stats = json.loads(activity_stats)
+                except:
+                    activity_stats = {}
+                    
             if current_period in activity_stats:
                 user_total = activity_stats[current_period].get("total", 0)
                 if user_total > total_events_in_period:
@@ -563,6 +805,9 @@ async def get_total_events_in_period(guild_id=0, period: str = "current"):
 
 async def get_all_attendance_data(guild_id=0, period: str = "current"):
     """獲取所有用戶的出席數據"""
+    if not db.is_connected:
+        return []
+    
     # 獲取總活動數
     total_events = await get_total_events_in_period(guild_id, period)
     
@@ -582,6 +827,13 @@ async def get_all_attendance_data(guild_id=0, period: str = "current"):
         user_id = row['user_id']
         username = row['username']
         activity_stats = row['activity_stats'] or {}
+        
+        # 解析 JSON 數據
+        if isinstance(activity_stats, str):
+            try:
+                activity_stats = json.loads(activity_stats)
+            except:
+                activity_stats = {}
         
         if period == "current":
             if current_period in activity_stats:
@@ -610,6 +862,9 @@ async def get_all_attendance_data(guild_id=0, period: str = "current"):
 
 async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
     """結束抽獎"""
+    if not db.is_connected:
+        return
+    
     try:
         result = await db.fetchrow(
             """
@@ -647,9 +902,16 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
             else:
                 winners_list = random.sample(participants, winner_count)
             
+            # 解析 JSON 數據
+            if isinstance(winners_list, str):
+                try:
+                    winners_list = json.loads(winners_list)
+                except:
+                    winners_list = []
+            
             await db.execute(
                 "UPDATE giveaways SET winners = $1, is_active = false WHERE id = $2",
-                winners_list, giveaway_id
+                json.dumps(winners_list), giveaway_id
             )
             
             new_embed = discord.Embed(
@@ -687,10 +949,13 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
             await message.clear_reactions()
         
     except Exception as e:
-        print(f"結束抽獎錯誤: {e}")
+        print(f"❌ 結束抽獎錯誤: {e}")
 
 async def end_evaluation(event_id, channel, event_name, guild_id=0):
     """結束評核活動"""
+    if not db.is_connected:
+        return
+    
     try:
         result = await db.fetchrow(
             """
@@ -708,6 +973,25 @@ async def end_evaluation(event_id, channel, event_name, guild_id=0):
         professions = result['professions'] or {}
         ratings = result['ratings'] or {}
         rating_message_id = result['rating_message_id']
+        
+        # 解析 JSON 數據
+        if isinstance(participants, str):
+            try:
+                participants = json.loads(participants)
+            except:
+                participants = []
+        
+        if isinstance(professions, str):
+            try:
+                professions = json.loads(professions)
+            except:
+                professions = {}
+        
+        if isinstance(ratings, str):
+            try:
+                ratings = json.loads(ratings)
+            except:
+                ratings = {}
         
         await db.execute(
             "UPDATE evaluation_events SET is_active = false WHERE id = $1",
@@ -729,8 +1013,12 @@ async def end_evaluation(event_id, channel, event_name, guild_id=0):
             rating_summary = {}
             for user_id, rating_list in ratings.items():
                 if rating_list:
-                    latest_rating = rating_list[-1]["rating"]
-                    rating_summary[latest_rating] = rating_summary.get(latest_rating, 0) + 1
+                    if isinstance(rating_list, list):
+                        latest_rating = rating_list[-1]["rating"] if rating_list else None
+                    else:
+                        latest_rating = rating_list
+                    if latest_rating:
+                        rating_summary[latest_rating] = rating_summary.get(latest_rating, 0) + 1
             
             rating_text = ""
             for rating_type in ["優秀", "良好", "普通", "不合格"]:
@@ -744,7 +1032,7 @@ async def end_evaluation(event_id, channel, event_name, guild_id=0):
             await rating_message.edit(embed=end_embed)
             
         except Exception as e:
-            print(f"更新評核訊息錯誤: {e}")
+            print(f"❌ 更新評核訊息錯誤: {e}")
         
         summary_embed = discord.Embed(
             title=f"🏁 活動總結：{event_name}",
@@ -762,17 +1050,122 @@ async def end_evaluation(event_id, channel, event_name, guild_id=0):
         print(f"✅ 評核活動已結束: {event_name}")
         
     except Exception as e:
-        print(f"結束評核活動錯誤: {e}")
+        print(f"❌ 結束評核活動錯誤: {e}")
 
 async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: int = 0):
     """記錄查詢日誌"""
+    if not db.is_connected:
+        return
+    
     try:
         await db.execute(
             "INSERT INTO query_logs (query_type, user_id, parameters, guild_id) VALUES ($1, $2, $3, $4)",
             query_type, user_id, json.dumps(parameters), guild_id
         )
     except Exception as e:
-        print(f"記錄查詢日誌錯誤: {e}")
+        print(f"❌ 記錄查詢日誌錯誤: {e}")
+
+# ========== 新增測試指令 ==========
+
+@tree.command(name="db_status", description="檢查資料庫連接狀態")
+async def db_status_slash(interaction: discord.Interaction):
+    """檢查資料庫狀態"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        embed = discord.Embed(title="📊 資料庫狀態檢查", color=0x7289DA)
+        
+        # 檢查連接狀態
+        if db.is_connected:
+            embed.add_field(name="🔌 連接狀態", value="✅ 已連接", inline=True)
+            
+            # 測試查詢
+            try:
+                test_result = await db.fetchval("SELECT 1")
+                if test_result == 1:
+                    embed.add_field(name="🔧 測試查詢", value="✅ 成功", inline=True)
+                else:
+                    embed.add_field(name="🔧 測試查詢", value="❌ 失敗", inline=True)
+                    
+                # 檢查表格
+                tables = await db.fetch("""
+                    SELECT table_name FROM information_schema.tables 
+                    WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                """)
+                
+                table_count = len(tables)
+                embed.add_field(name="📋 資料表數量", value=f"{table_count} 個", inline=True)
+                
+                if table_count > 0:
+                    table_list = "\n".join([f"• {t['table_name']}" for t in tables[:5]])
+                    if table_count > 5:
+                        table_list += f"\n... 還有 {table_count-5} 個"
+                    embed.add_field(name="📊 資料表列表", value=table_list, inline=False)
+                
+            except Exception as e:
+                embed.add_field(name="🔧 測試查詢", value=f"❌ 錯誤: {str(e)[:100]}", inline=True)
+                
+        else:
+            embed.add_field(name="🔌 連接狀態", value="❌ 未連接", inline=True)
+            
+            # 檢查環境變數
+            database_url = os.getenv('DATABASE_URL')
+            if database_url:
+                # 隱藏密碼顯示
+                safe_url = database_url
+                if '@' in database_url:
+                    safe_url = database_url.split('@')[0] + '@***/***'
+                embed.add_field(name="🔑 DATABASE_URL", value=f"✅ 已設定\n`{safe_url[:50]}...`", inline=False)
+            else:
+                embed.add_field(name="🔑 DATABASE_URL", value="❌ 未設定", inline=False)
+            
+            embed.add_field(
+                name="💡 解決方案",
+                value="1. 檢查 Railway 環境變數\n2. 重啟機器人\n3. 聯繫管理員",
+                inline=False
+            )
+        
+        # 添加記憶體緩存狀態
+        cache_status = "✅ 啟用中" if not db.is_connected else "⚡ 備用中"
+        embed.add_field(name="📝 記憶體緩存", value=cache_status, inline=True)
+        
+        embed.set_footer(text=f"檢查時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ 檢查失敗: {str(e)[:100]}", ephemeral=True)
+
+@tree.command(name="test_chat_score", description="測試聊天積分功能")
+async def test_chat_score_slash(interaction: discord.Interaction):
+    """測試聊天積分"""
+    await interaction.response.defer(ephemeral=True)
+    
+    guild_id = get_guild_id(interaction)
+    
+    # 測試添加聊天積分
+    added_score, daily_limit = await add_chat_score(
+        interaction.user.id,
+        interaction.user.name,
+        guild_id
+    )
+    
+    # 獲取當前狀態
+    current_score, total_score = await get_user_score(interaction.user.id, guild_id)
+    
+    embed = discord.Embed(
+        title="💬 聊天積分測試",
+        color=0x00FF00 if added_score > 0 else 0xFFA500
+    )
+    
+    embed.add_field(name="本次獲得積分", value=f"+{added_score} 分", inline=True)
+    embed.add_field(name="當前總積分", value=f"{current_score} 分", inline=True)
+    embed.add_field(name="歷史總積分", value=f"{total_score} 分", inline=True)
+    embed.add_field(name="積分規則", value=f"每句話 +{CHAT_SCORE} 分", inline=False)
+    embed.add_field(name="每日上限", value=f"{DAILY_CHAT_LIMIT} 分", inline=True)
+    embed.add_field(name="下次重置", value="每日 UTC+8 00:00", inline=True)
+    embed.add_field(name="資料庫狀態", value="✅ 正常" if db.is_connected else "⚠️ 使用緩存", inline=True)
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ========== 同步指令 ==========
 
@@ -820,7 +1213,7 @@ async def help_slash(interaction: discord.Interaction):
     )
     
     embed.add_field(
-        name="👤 用戶指令 (10個)",
+        name="👤 用戶指令 (11個)",
         value=(
             "`/help` - 顯示此幫助訊息\n"
             "`/profile` - 查看我的數據\n"
@@ -831,7 +1224,8 @@ async def help_slash(interaction: discord.Interaction):
             "`/random_team [人數] [組數]` - 隨機分組\n"
             "`/score_ranking` - 查看積分排行榜\n"
             "`/attendance_ranking` - 查看出席率排行榜\n"
-            "`/blessing` - 測試今日運程 **(新增)**"
+            "`/blessing` - 測試今日運程\n"
+            "`/test_chat_score` - 測試聊天積分 **(新增)**"
         ),
         inline=False
     )
@@ -848,9 +1242,18 @@ async def help_slash(interaction: discord.Interaction):
     )
     
     embed.add_field(
+        name="🔧 系統指令 (2個)",
+        value=(
+            "`/sync` - 同步指令（擁有者）\n"
+            "`/db_status` - 檢查資料庫狀態 **(新增)**"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
         name="💰 積分系統",
         value=(
-            "**聊天獎勵：** 每句話 +5 分，每日上限 20 分 **(新增)**\n"
+            "**聊天獎勵：** 每句話 +5 分，每日上限 20 分\n"
             "**簽到獎勵：** 40 積分\n"
             "**職業加成：** 補師 +20 積分\n"
             "**評核獎勵：**\n"
@@ -862,7 +1265,8 @@ async def help_slash(interaction: discord.Interaction):
         inline=False
     )
     
-    embed.set_footer(text=f"總指令數: 14個 | 版本: PostgreSQL 持久化版本")
+    db_status = "✅ 正常" if db.is_connected else "⚠️ 使用緩存"
+    embed.set_footer(text=f"總指令數: 17個 | 資料庫狀態: {db_status}")
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="profile", description="查看我的數據")
@@ -871,6 +1275,15 @@ async def profile_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     
     try:
+        # 檢查資料庫連接
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="ℹ️ 資料庫未連接",
+                description="目前使用記憶體緩存模式，數據可能不會永久保存。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+        
         user_id = interaction.user.id
         username = interaction.user.name
         guild_id = get_guild_id(interaction)
@@ -880,10 +1293,11 @@ async def profile_slash(interaction: discord.Interaction):
         profile = await get_user_profile(user_id, guild_id)
         
         if not profile:
-            await db.execute(
-                "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
-                user_id, username, 0, 0, guild_id
-            )
+            if db.is_connected:
+                await db.execute(
+                    "INSERT INTO users (user_id, username, current_score, total_score, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                    user_id, username, 0, 0, guild_id
+                )
             
             profile = {
                 'user_id': user_id,
@@ -912,6 +1326,10 @@ async def profile_slash(interaction: discord.Interaction):
             title=f"📊 {username} 的評核數據",
             color=0x43B581
         )
+        
+        # 添加資料庫狀態標記
+        db_status = "✅ 資料庫" if db.is_connected else "📝 緩存"
+        embed.add_field(name="儲存狀態", value=db_status, inline=True)
         
         attendance_info = (
             f"**當前半月期：** {current_period}\n"
@@ -1018,6 +1436,15 @@ async def giveaway_slash(
     await interaction.response.defer()
     
     try:
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法創建抽獎，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("giveaway", interaction.user.id, {"prize": prize, "duration": duration, "winners": winners}, guild_id)
         
@@ -1123,6 +1550,11 @@ async def giveaway_slash(
                         participants_count = 0
                         if result and result['participants']:
                             participants = result['participants']
+                            if isinstance(participants, str):
+                                try:
+                                    participants = json.loads(participants)
+                                except:
+                                    participants = []
                             participants_count = len(participants)
                         
                         new_embed = discord.Embed(
@@ -1144,7 +1576,7 @@ async def giveaway_slash(
                         last_update = time.time()
                         
                     except Exception as e:
-                        print(f"更新抽獎訊息錯誤: {e}")
+                        print(f"❌ 更新抽獎訊息錯誤: {e}")
             
             await end_giveaway(message.id, guild_id=guild_id)
         
@@ -1164,6 +1596,15 @@ async def score_draw_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     
     try:
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法進行積分抽獎，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("score_draw", interaction.user.id, {"action": "open_draw"}, guild_id)
         
@@ -1334,16 +1775,15 @@ async def score_transfer_slash(
             await interaction.followup.send(f"❌ 你的積分不足！需要 {amount} 分，你目前有 {sender_score} 分")
             return
         
-        async with aiosqlite.connect(DB_NAME) as conn:
-            await update_user_score(interaction.user.id, interaction.user.name, -amount, f"轉移給 {user.name}", guild_id)
-            await update_user_score(user.id, user.name, amount, f"來自 {interaction.user.name} 的轉移", guild_id)
-            
-            await conn.execute('''
-                INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (interaction.user.id, user.id, amount, reason or "無", guild_id))
-            
-            await conn.commit()
+        # 更新雙方積分
+        await update_user_score(interaction.user.id, interaction.user.name, -amount, f"轉移給 {user.name}", guild_id)
+        await update_user_score(user.id, user.name, amount, f"來自 {interaction.user.name} 的轉移", guild_id)
+        
+        if db.is_connected:
+            await db.execute(
+                "INSERT INTO score_transfers (from_user_id, to_user_id, amount, reason, guild_id) VALUES ($1, $2, $3, $4, $5)",
+                interaction.user.id, user.id, amount, reason or "無", guild_id
+            )
         
         new_sender_score, _ = await get_user_score(interaction.user.id, guild_id)
         
@@ -1373,6 +1813,15 @@ async def prizelist_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     
     try:
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法查看彩池列表，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("prizelist", interaction.user.id, {"action": "view_pool"}, guild_id)
         
@@ -1639,6 +2088,15 @@ async def score_ranking_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     
     try:
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法查看積分排行榜，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("score_ranking", interaction.user.id, {"action": "view_ranking"}, guild_id)
         
@@ -1732,6 +2190,15 @@ async def attendance_ranking_slash(
     await interaction.response.defer()
     
     try:
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法查看出席率排行榜，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("attendance_ranking", interaction.user.id, {"period": period, "page": page}, guild_id)
         
@@ -2157,6 +2624,15 @@ async def add_prize_slash(
             await interaction.followup.send("❌ 需要管理員權限")
             return
         
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法操作彩池，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         
         valid_levels = ["綠箱", "藍箱", "紫箱", "金箱"]
@@ -2332,6 +2808,15 @@ async def create_event_slash(
             await interaction.followup.send("❌ 需要管理員權限")
             return
         
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法創建活動，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
+            return
+        
         guild_id = get_guild_id(interaction)
         await log_query("create_event", interaction.user.id, {"event_name": event_name, "signup_time": signup_time, "prize": prize}, guild_id)
         
@@ -2400,6 +2885,11 @@ async def create_event_slash(
                     participants_count = 0
                     if result and result['participants']:
                         participants = result['participants']
+                        if isinstance(participants, str):
+                            try:
+                                participants = json.loads(participants)
+                            except:
+                                participants = []
                         participants_count = len(participants)
                     
                     updated_embed = discord.Embed(
@@ -2424,7 +2914,7 @@ async def create_event_slash(
                     await signup_message.edit(embed=updated_embed)
                     
                 except Exception as e:
-                    print(f"更新簽到訊息錯誤: {e}")
+                    print(f"❌ 更新簽到訊息錯誤: {e}")
             
             # 簽到時間結束，處理簽到結果
             try:
@@ -2436,6 +2926,11 @@ async def create_event_slash(
                 participants = []
                 if result and result['participants']:
                     participants = result['participants']
+                    if isinstance(participants, str):
+                        try:
+                            participants = json.loads(participants)
+                        except:
+                            participants = []
                 
                 # 為所有參與者發放簽到獎勵
                 for user_id in participants:
@@ -2446,7 +2941,7 @@ async def create_event_slash(
                 # 更新活動狀態
                 await db.execute(
                     "UPDATE evaluation_events SET default_rated = $1, is_active = true WHERE signup_message_id = $2 AND guild_id = $3",
-                    participants, signup_message.id, guild_id
+                    json.dumps(participants), signup_message.id, guild_id
                 )
                 
                 # 更新簽到訊息
@@ -2514,7 +3009,7 @@ async def create_event_slash(
                 print(f"✅ 評核階段已創建: {event_name}, 評核訊息ID: {rating_msg.id}")
                 
             except Exception as e:
-                print(f"簽到結束處理錯誤: {e}")
+                print(f"❌ 簽到結束處理錯誤: {e}")
         
         # 啟動簽到倒計時
         asyncio.create_task(signup_countdown())
@@ -2547,6 +3042,15 @@ async def activity_stats_slash(interaction: discord.Interaction):
     try:
         if not interaction.user.guild_permissions.administrator:
             await interaction.followup.send("❌ 需要管理員權限")
+            return
+        
+        if not db.is_connected:
+            embed = discord.Embed(
+                title="⚠️ 資料庫未連接",
+                description="無法查看活動統計，請稍後再試。",
+                color=0xFFA500
+            )
+            await interaction.followup.send(embed=embed)
             return
         
         guild_id = get_guild_id(interaction)
@@ -2677,17 +3181,26 @@ async def on_message(message):
             guild_id
         )
         
-        # 隨機發送鼓勵訊息（機率 1%）
-        if added_score > 0 and random.random() < 0.01:
-            responses = [
-                f"💬 聊天 +{added_score} 分！繼續保持～",
-                f"✨ 活躍獎勵 +{added_score} 分！",
-                f"🎯 發言獲得 +{added_score} 分！"
-            ]
-            await message.channel.send(random.choice(responses), delete_after=10)
+        if added_score > 0:
+            # 獲取用戶當前的聊天積分狀態
+            current_score, total_score = await get_user_score(message.author.id, guild_id)
             
+            # 增加通知頻率（每5句話通知一次）
+            if random.random() < 0.2:  # 20% 機率通知
+                responses = [
+                    f"💬 {message.author.mention} 聊天 +{added_score} 分！",
+                    f"✨ {message.author.mention} 活躍獎勵 +{added_score} 分！",
+                    f"🎯 {message.author.mention} 發言獲得 +{added_score} 分！",
+                    f"💭 {message.author.mention} 目前積分：{current_score} 分"
+                ]
+                
+                # 如果是第一次獲得積分或達到上限時通知
+                if current_score <= added_score or current_score >= DAILY_CHAT_LIMIT:
+                    notification = random.choice(responses)
+                    await message.channel.send(notification, delete_after=8)
+                    
     except Exception as e:
-        print(f"處理聊天積分錯誤: {e}")
+        print(f"❌ 處理聊天積分錯誤: {e}")
     
     # 繼續處理其他事件
     await bot.process_commands(message)
@@ -2741,7 +3254,7 @@ async def on_raw_reaction_add(payload):
                         pass
                     return
             except Exception as admin_error:
-                print(f"檢查管理員權限錯誤: {admin_error}")
+                print(f"❌ 檢查管理員權限錯誤: {admin_error}")
                 return
             
             confirm_embed = discord.Embed(
@@ -2814,7 +3327,7 @@ async def on_raw_reaction_add(payload):
                         pass
                     return
             except Exception as admin_error:
-                print(f"檢查管理員權限錯誤: {admin_error}")
+                print(f"❌ 檢查管理員權限錯誤: {admin_error}")
                 return
             
             result2 = await db.fetchrow(
@@ -2825,6 +3338,11 @@ async def on_raw_reaction_add(payload):
             participants = []
             if result2 and result2['participants']:
                 participants = result2['participants']
+                if isinstance(participants, str):
+                    try:
+                        participants = json.loads(participants)
+                    except:
+                        participants = []
             
             if not participants:
                 await channel.send("❌ 沒有參與者可以評核", delete_after=5)
@@ -2878,23 +3396,38 @@ async def on_raw_reaction_add(payload):
                         ratings = {}
                         if result3 and result3['ratings']:
                             ratings = result3['ratings']
+                            if isinstance(ratings, str):
+                                try:
+                                    ratings = json.loads(ratings)
+                                except:
+                                    ratings = {}
                         
                         old_rating = None
                         if str(selected_user_id) in ratings and ratings[str(selected_user_id)]:
-                            old_rating = ratings[str(selected_user_id)][-1]["rating"] if ratings[str(selected_user_id)] else None
+                            if isinstance(ratings[str(selected_user_id)], list):
+                                old_rating = ratings[str(selected_user_id)][-1]["rating"] if ratings[str(selected_user_id)] else None
+                            else:
+                                old_rating = ratings[str(selected_user_id)]
                         
                         if str(selected_user_id) not in ratings:
                             ratings[str(selected_user_id)] = []
                         
-                        ratings[str(selected_user_id)].append({
-                            "rater": interaction.user.id,
-                            "rating": self.rating_type,
-                            "time": datetime.now().isoformat()
-                        })
+                        if isinstance(ratings[str(selected_user_id)], list):
+                            ratings[str(selected_user_id)].append({
+                                "rater": interaction.user.id,
+                                "rating": self.rating_type,
+                                "time": datetime.now().isoformat()
+                            })
+                        else:
+                            ratings[str(selected_user_id)] = [{
+                                "rater": interaction.user.id,
+                                "rating": self.rating_type,
+                                "time": datetime.now().isoformat()
+                            }]
                         
                         await db.execute(
                             "UPDATE evaluation_events SET ratings = $1 WHERE id = $2 AND guild_id = $3",
-                            ratings, self.event_id, self.guild_id
+                            json.dumps(ratings), self.event_id, self.guild_id
                         )
                         
                         if old_rating and old_rating != self.rating_type:
@@ -2959,11 +3492,17 @@ async def on_raw_reaction_add(payload):
             creator_id = result['creator_id']
             
             if emoji == "🎫":
+                if isinstance(participants, str):
+                    try:
+                        participants = json.loads(participants)
+                    except:
+                        participants = []
+                
                 if user_id not in participants:
                     participants.append(user_id)
                     await db.execute(
                         "UPDATE giveaways SET participants = $1 WHERE id = $2 AND guild_id = $3",
-                        participants, giveaway_id, guild_id
+                        json.dumps(participants), giveaway_id, guild_id
                     )
                     
                     try:
@@ -2995,7 +3534,7 @@ async def on_raw_reaction_add(payload):
                             
                             await message.edit(embed=new_embed)
                     except Exception as e:
-                        print(f"更新抽獎訊息錯誤: {e}")
+                        print(f"❌ 更新抽獎訊息錯誤: {e}")
             
             elif emoji == "⏹️" and user_id == creator_id:
                 await end_giveaway(payload.message_id, manual=True, guild_id=guild_id)
@@ -3017,6 +3556,13 @@ async def on_raw_reaction_add(payload):
             participants = result['participants'] or []
             signup_end_time_str = result['signup_end_time']
             
+            # 解析參與者列表
+            if isinstance(participants, str):
+                try:
+                    participants = json.loads(participants)
+                except:
+                    participants = []
+            
             try:
                 if signup_end_time_str:
                     try:
@@ -3036,7 +3582,7 @@ async def on_raw_reaction_add(payload):
                         pass
                     return
             except Exception as time_error:
-                print(f"時間解析錯誤: {time_error}")
+                print(f"❌ 時間解析錯誤: {time_error}")
             
             # 修復：檢查用戶是否已經簽到
             if user_id not in participants:
@@ -3045,7 +3591,7 @@ async def on_raw_reaction_add(payload):
                 # 更新資料庫中的參與者列表
                 await db.execute(
                     "UPDATE evaluation_events SET participants = $1 WHERE id = $2 AND guild_id = $3",
-                    participants, event_id, guild_id
+                    json.dumps(participants), event_id, guild_id
                 )
                 
                 print(f"✅ 用戶 {user_id} 成功簽到活動 {event_id}, 現在有 {len(participants)} 人簽到")
@@ -3086,7 +3632,7 @@ async def on_raw_reaction_add(payload):
                         
                         await message.edit(embed=new_embed)
                 except Exception as e:
-                    print(f"更新簽到訊息錯誤: {e}")
+                    print(f"❌ 更新簽到訊息錯誤: {e}")
             else:
                 print(f"⚠️ 用戶 {user_id} 已經簽到過了")
             return
@@ -3106,6 +3652,13 @@ async def on_raw_reaction_add(payload):
             professions = result['professions'] or {}
             profession_name = PROFESSION_EMOJIS[emoji]
             
+            # 解析職業數據
+            if isinstance(professions, str):
+                try:
+                    professions = json.loads(professions)
+                except:
+                    professions = {}
+            
             result2 = await db.fetchrow(
                 "SELECT participants FROM evaluation_events WHERE id = $1 AND guild_id = $2",
                 event_id, guild_id
@@ -3113,13 +3666,18 @@ async def on_raw_reaction_add(payload):
             
             if result2 and result2['participants']:
                 participants = result2['participants']
+                if isinstance(participants, str):
+                    try:
+                        participants = json.loads(participants)
+                    except:
+                        participants = []
                 
                 if user_id in participants:
                     if str(user_id) not in professions:
                         professions[str(user_id)] = profession_name
                         await db.execute(
                             "UPDATE evaluation_events SET professions = $1 WHERE id = $2 AND guild_id = $3",
-                            professions, event_id, guild_id
+                            json.dumps(professions), event_id, guild_id
                         )
                         
                         await update_user_profession(user_id, profession_name, guild_id)
@@ -3145,8 +3703,7 @@ async def on_raw_reaction_add(payload):
             return
             
     except Exception as e:
-        print(f"處理反應錯誤: {e}")
-        import traceback
+        print(f"❌ 處理反應錯誤: {e}")
         traceback.print_exc()
 
 # ========== 機器人上線 ==========
@@ -3155,52 +3712,78 @@ async def on_raw_reaction_add(payload):
 async def on_ready():
     """機器人上線"""
     print(f"\n{'='*60}")
-    print(f"🤖 {BOT_NAME} - PostgreSQL 版本已上線")
+    print(f"🤖 {BOT_NAME} - PostgreSQL 修正版已上線")
     print(f"📊 伺服器數量: {len(bot.guilds)}")
     print(f"{'='*60}")
     
-    # 連接 PostgreSQL
-    success = await db.connect()
-    if not success:
-        print("⚠️ PostgreSQL 連接失敗，機器人將繼續運行但數據可能不會保存")
+    # 顯示所有伺服器
+    for guild in bot.guilds:
+        print(f"🏰 {guild.name} (ID: {guild.id})")
     
+    # 連接 PostgreSQL
+    print(f"\n🔌 正在連接資料庫...")
+    success = await db.connect()
+    
+    if success:
+        print("✅ 資料庫連接成功")
+    else:
+        print("❌ 資料庫連接失敗")
+        print("⚠️ 機器人將使用記憶體緩存模式運行")
+        print("💡 請檢查：")
+        print("   1. Railway 專案中的 DATABASE_URL 環境變數")
+        print("   2. PostgreSQL 服務是否正常運行")
+        print("   3. 網路連接是否正常")
+    
+    # 同步指令
     try:
         print("\n🔄 正在同步指令...")
         global_synced = await tree.sync()
         print(f"✅ 已同步 {len(global_synced)} 個指令")
         
-        print("\n📋 新增功能:")
-        print("  • /blessing - 測試運程功能")
-        print("  • 聊天積分系統 - 每句 +5 分，每日上限 20 分")
-        print("  • PostgreSQL 數據持久化")
-        print("  • 獎品增減功能修復")
+        print("\n📋 完整功能列表:")
+        print("  • 用戶指令 (11個): /help, /profile, /giveaway, /score_draw, /score_transfer, /prizelist, /random_team, /score_ranking, /attendance_ranking, /blessing, /test_chat_score")
+        print("  • 管理員指令 (4個): /add_prize, /add_score, /create_event, /activity_stats")
+        print("  • 系統指令 (2個): /sync, /db_status")
+        print("  • 聊天積分系統: 每句話 +5 分，每日上限 20 分")
+        print("  • 評核活動系統: 簽到、職業選擇、評核評分")
+        print("  • 抽獎系統: 自動開獎、手動結束")
+        print("  • 彩池系統: 獎品增減、積分抽獎")
+        print("  • 資料庫狀態檢查: /db_status")
+        print("  • 記憶體緩存系統: 資料庫失敗時使用")
         
-        print("\n📊 可用指令 (14個):")
-        for cmd in global_synced:
+        print("\n📊 可用指令列表:")
+        for cmd in sorted(global_synced, key=lambda x: x.name):
             print(f"  • /{cmd.name} - {cmd.description}")
         
     except Exception as e:
         print(f"❌ 同步失敗: {e}")
     
+    # 設置狀態
+    if success:
+        status_text = "/help | 資料庫正常"
+    else:
+        status_text = "/help | 使用緩存模式"
+    
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="/help 查看14個指令"
+            name=status_text
         )
     )
     
-    print(f"\n🎮 機器人準備就緒！指令數: 14")
+    print(f"\n🎮 機器人準備就緒！資料庫狀態: {'✅' if success else '❌'}")
+    print(f"📝 記憶體緩存: {'✅ 啟用中' if not success else '⚡ 備用中'}")
 
 # ========== 主程式 ==========
 
 def main():
     """主程式入口"""
     print(f"{'='*50}")
-    print(f"🚀 啟動 {BOT_NAME} - PostgreSQL 持久化版本")
-    print(f"💡 新增功能：測試運程、聊天積分")
+    print(f"🚀 啟動 {BOT_NAME} - PostgreSQL 完整修正版本")
+    print(f"💡 完整功能：17個指令 + 聊天積分 + 評核活動 + 抽獎系統")
     print(f"🔧 擁有者ID: {OWNER_IDS}")
-    print(f"🗄️ 資料庫: PostgreSQL (Railway)")
-    print(f"📊 指令數量: 14個 (10用戶 + 4管理員)")
+    print(f"🗄️ 資料庫: PostgreSQL (Railway) + 記憶體緩存備份")
+    print(f"📊 指令數量: 17個 (11用戶 + 4管理員 + 2系統)")
     print(f"{'='*50}")
     
     token = os.getenv("DISCORD_TOKEN")
@@ -3224,9 +3807,7 @@ def main():
         print("💡 請到 Discord Developer Portal 重置 Token")
     except Exception as e:
         print(f"❌ 啟動失敗: {e}")
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
-
-
-
