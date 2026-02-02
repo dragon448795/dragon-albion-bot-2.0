@@ -1895,49 +1895,21 @@ async def add_prize_slash(
                 
                 action = "添加"
             elif quantity < 0:
-    # 減少獎品邏輯
-    # 先檢查獎品是否存在
-    async with conn.execute(
-        "SELECT quantity, remaining FROM prize_pool WHERE prize_name = ? AND box_level = ? AND guild_id = ?",
-        (name.strip(), box_level.strip(), guild_id)
-    ) as cursor:
-        result = await cursor.fetchone()
-    
-    if not result:
-        await interaction.followup.send(f"❌ 找不到獎品 '{name}' 在 {box_level} 中")
-        return
-    
-    current_quantity, current_remaining = result
-    reduce_amount = abs(quantity)
-    
-    # 檢查庫存是否足夠
-    if reduce_amount > current_quantity:
-        await interaction.followup.send(
-            f"❌ 庫存不足！無法減少 {reduce_amount} 個\n"
-            f"**現有庫存：** {current_quantity} 個\n"
-            f"**建議操作：** 輸入 `-{current_quantity}` 來完全移除"
-        )
-        return
-    
-    # 計算新數量
-    new_quantity = current_quantity - reduce_amount
-    new_remaining = max(0, current_remaining - reduce_amount)
-    
-    # 更新資料庫
-    if new_quantity <= 0:
-        await conn.execute(
-            "DELETE FROM prize_pool WHERE prize_name = ? AND box_level = ? AND guild_id = ?",
-            (name, box_level, guild_id)
-        )
-    else:
-        await conn.execute('''
-            UPDATE prize_pool 
-            SET quantity = ?,
-                remaining = ?
-            WHERE prize_name = ? AND box_level = ? AND guild_id = ?
-        ''', (new_quantity, new_remaining, name, box_level, guild_id))
-    
-    action = "減少"
+                await conn.execute('''
+                    UPDATE prize_pool 
+                    SET quantity = quantity + ?,
+                        remaining = CASE 
+                                        WHEN remaining + ? > 0 THEN remaining + ?
+                                        ELSE 0
+                                    END
+                    WHERE prize_name = ? AND box_level = ? AND guild_id = ?
+                ''', (quantity, quantity, quantity, name, box_level, guild_id))
+                
+                if (await conn.total_changes) == 0:
+                    await interaction.followup.send(f"❌ 找不到獎品 '{name}' 在 {box_level} 中")
+                    return
+                
+                action = "減少"
             else:
                 await interaction.followup.send("❌ 數量不能為 0")
                 return
@@ -2864,4 +2836,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
