@@ -2714,9 +2714,21 @@ async def add_prize_slash(
         # 初始化變數
         total_qty = 0
         remaining_qty = 0
+        current_qty = 0  # ⬅️ 提前初始化
+        current_remaining = 0  # ⬅️ 提前初始化
         action = ""
         
         if quantity > 0:
+            # 添加獎品 - 先檢查現有數量以取得原數量
+            existing = await db.fetchrow(
+                "SELECT quantity, remaining FROM prize_pool WHERE prize_name = $1 AND box_level = $2 AND guild_id = $3",
+                name, box_level, guild_id
+            )
+            
+            if existing:
+                current_qty = existing['quantity']
+                current_remaining = existing['remaining']
+            
             # 添加獎品
             result = await db.fetchrow(
                 """
@@ -2765,10 +2777,6 @@ async def add_prize_slash(
                 total_qty = 0
                 remaining_qty = 0
                 
-                # 刪除後，也更新原數量用於顯示
-                current_qty = existing['quantity']  # 原來的數量
-                current_remaining = existing['remaining']  # 原來的剩餘數量
-                
             else:
                 # 更新數量
                 await db.execute(
@@ -2782,10 +2790,6 @@ async def add_prize_slash(
                 action = "減少"
                 total_qty = new_qty
                 remaining_qty = new_remaining
-                
-                # 更新原數量用於顯示
-                current_qty = existing['quantity']  # 原來的數量
-                current_remaining = existing['remaining']  # 原來的剩餘數量
         else:
             await interaction.followup.send("❌ 數量不能為 0")
             return
@@ -2820,7 +2824,6 @@ async def add_prize_slash(
             description=f"錯誤：{str(e)}",
             color=0xFF0000
         )
-        traceback.print_exc()  # 加入詳細錯誤日誌
         await interaction.followup.send(embed=error_embed)
 
 @tree.command(name="add_score", description="調整用戶積分")
@@ -3901,6 +3904,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
