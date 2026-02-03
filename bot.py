@@ -2687,6 +2687,11 @@ async def add_prize_slash(
             await interaction.followup.send(f"❌ 無效的寶箱等級！請選擇：{', '.join(valid_levels)}")
             return
         
+        # 初始化變數
+        total_qty = 0
+        remaining_qty = 0
+        action = ""
+        
         if quantity > 0:
             # 添加獎品
             result = await db.fetchrow(
@@ -2701,6 +2706,10 @@ async def add_prize_slash(
                 """,
                 name, box_level, quantity, quantity, interaction.user.id, guild_id
             )
+            
+            if result:
+                total_qty = result['quantity']
+                remaining_qty = result['remaining']
             
             action = "添加"
             
@@ -2719,7 +2728,7 @@ async def add_prize_slash(
             current_remaining = existing['remaining']
             
             # 計算新的數量（不能少於0）
-            new_qty = max(current_qty + quantity, 0)
+            new_qty = max(current_qty + quantity, 0)  # quantity 是負數
             new_remaining = max(current_remaining + quantity, 0)
             
             if new_qty == 0:
@@ -2731,6 +2740,11 @@ async def add_prize_slash(
                 action = "刪除"
                 total_qty = 0
                 remaining_qty = 0
+                
+                # 刪除後，也更新原數量用於顯示
+                current_qty = existing['quantity']  # 原來的數量
+                current_remaining = existing['remaining']  # 原來的剩餘數量
+                
             else:
                 # 更新數量
                 await db.execute(
@@ -2744,13 +2758,13 @@ async def add_prize_slash(
                 action = "減少"
                 total_qty = new_qty
                 remaining_qty = new_remaining
+                
+                # 更新原數量用於顯示
+                current_qty = existing['quantity']  # 原來的數量
+                current_remaining = existing['remaining']  # 原來的剩餘數量
         else:
             await interaction.followup.send("❌ 數量不能為 0")
             return
-        
-        if quantity > 0 or (quantity < 0 and new_qty > 0):
-            total_qty = result['quantity']
-            remaining_qty = result['remaining']
         
         # 發送結果
         color = 0x2ECC71 if quantity > 0 else 0xE74C3C
@@ -2759,14 +2773,18 @@ async def add_prize_slash(
         embed = discord.Embed(title=title, color=color)
         embed.add_field(name="獎品名稱", value=name, inline=True)
         embed.add_field(name="寶箱等級", value=box_level, inline=True)
+        embed.add_field(name="操作類型", value=action, inline=True)
         
         if action != "刪除":
-            embed.add_field(name=f"{action}數量", value=f"{abs(quantity)} 個", inline=True)
-            embed.add_field(name="總數量", value=f"{total_qty} 個", inline=True)
-            embed.add_field(name="剩餘數量", value=f"{remaining_qty} 個", inline=True)
+            embed.add_field(name="變動數量", value=f"{abs(quantity)} 個", inline=True)
+            embed.add_field(name="原數量", value=f"{current_qty} 個", inline=True)
+            embed.add_field(name="新總數量", value=f"{total_qty} 個", inline=True)
+            embed.add_field(name="原剩餘", value=f"{current_remaining} 個", inline=True)
+            embed.add_field(name="新剩餘", value=f"{remaining_qty} 個", inline=True)
         else:
             embed.add_field(name="操作", value="已從彩池中刪除", inline=True)
             embed.add_field(name="原數量", value=f"{current_qty} 個", inline=True)
+            embed.add_field(name="原剩餘", value=f"{current_remaining} 個", inline=True)
         
         embed.add_field(name="操作者", value=interaction.user.mention, inline=True)
         
@@ -2778,6 +2796,7 @@ async def add_prize_slash(
             description=f"錯誤：{str(e)}",
             color=0xFF0000
         )
+        traceback.print_exc()  # 加入詳細錯誤日誌
         await interaction.followup.send(embed=error_embed)
 
 @tree.command(name="add_score", description="調整用戶積分")
@@ -3858,4 +3877,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
