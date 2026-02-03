@@ -886,6 +886,12 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
         winners = result['winners'] or []
         channel_id = result['channel_id']
         
+        # ========== 新增：除錯日誌 ==========
+        print(f"🔍 抽獎結束除錯:")
+        print(f"  - 抽獎ID: {giveaway_id}")
+        print(f"  - participants 原始數據: {participants}")
+        print(f"  - participants 類型: {type(participants)}")
+        
         channel = bot.get_channel(channel_id)
         
         if not channel:
@@ -897,23 +903,60 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
             return
         
         if participants:
-            if len(participants) <= winner_count:
-                winners_list = participants
+            # ========== 修正：確保 participants 是正確的陣列 ==========
+            # 方法 1：如果是字符串，解析為 JSON
+            if isinstance(participants, str):
+                try:
+                    participants = json.loads(participants)
+                    print(f"  - 已解析 participants: {participants}")
+                except Exception as e:
+                    print(f"  ❌ 解析 participants 失敗: {e}")
+                    participants = []
+            
+            # 方法 2：如果是列表，確保元素是整數（Discord ID）
+            if isinstance(participants, list):
+                # 清理列表，確保所有元素都是整數
+                cleaned_participants = []
+                for p in participants:
+                    try:
+                        if isinstance(p, str) and p.isdigit():
+                            cleaned_participants.append(int(p))
+                        elif isinstance(p, int):
+                            cleaned_participants.append(p)
+                        else:
+                            print(f"  ⚠️ 跳過無效的參與者: {p} (類型: {type(p)})")
+                    except Exception as e:
+                        print(f"  ⚠️ 處理參與者時錯誤: {e}")
+                
+                participants = cleaned_participants
+                print(f"  - 清理後的 participants: {participants}")
+            
+            # ========== 修正：選擇中獎者 ==========
+            if not participants:
+                print(f"  ⚠️ 沒有有效的參與者")
+                winners_list = []
+            elif len(participants) <= winner_count:
+                winners_list = participants  # 所有人都是中獎者
+                print(f"  - 中獎者 (所有人): {winners_list}")
             else:
                 winners_list = random.sample(participants, winner_count)
+                print(f"  - 隨機選擇的中獎者: {winners_list}")
             
-            # 解析 JSON 數據
-            if isinstance(winners_list, str):
-                try:
-                    winners_list = json.loads(winners_list)
-                except:
-                    winners_list = []
+            # ========== 修正：確保 winners_list 是字符串列表 ==========
+            # Discord ID 需要是字符串格式來顯示 <@ID>
+            winners_list_str = [str(uid) for uid in winners_list]
+            print(f"  - 中獎者字符串格式: {winners_list_str}")
+            
+            # 存入資料庫（確保是 JSON 格式）
+            winners_json = json.dumps(winners_list_str)
+            print(f"  - 存入資料庫的 JSON: {winners_json}")
             
             await db.execute(
                 "UPDATE giveaways SET winners = $1, is_active = false WHERE id = $2",
-                json.dumps(winners_list), giveaway_id
+                winners_json, giveaway_id
             )
             
+            # ========== 修正：顯示中獎者 ==========
             new_embed = discord.Embed(
                 title="🎉 抽獎已結束 🎉",
                 description="開獎完成！",
@@ -937,9 +980,12 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
             await message.edit(embed=new_embed)
             await message.clear_reactions()
             
+            # ========== 修正：發送中獎通知 ==========
             for winner_id in winners_list:
                 await channel.send(f"🎉 恭喜 <@{winner_id}> 獲得了 **{prize}**！")
+                
         else:
+            print(f"  ⚠️ 沒有參與者")
             new_embed = discord.Embed(
                 title="🎉 抽獎已結束",
                 description="無人參與抽獎" + ("（手動結束）" if manual else ""),
@@ -950,7 +996,8 @@ async def end_giveaway(message_id: int, manual: bool = False, guild_id=0):
         
     except Exception as e:
         print(f"❌ 結束抽獎錯誤: {e}")
-
+        traceback.print_exc()
+        
 async def end_evaluation(event_id, channel, event_name, guild_id=0):
     """結束評核活動"""
     if not db.is_connected:
@@ -3811,3 +3858,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
