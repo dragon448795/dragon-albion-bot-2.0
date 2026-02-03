@@ -560,7 +560,7 @@ async def get_user_profile(user_id, guild_id=0):
     """獲取用戶完整資料（修正JSON解析問題）"""
     if db.is_connected:
         result = await db.fetchrow(
-            "SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats FROM users WHERE user_id = $1 AND guild_id = $2",
+            "SELECT current_score, total_score, join_date, profession_counts, activity_stats, rating_stats, last_chat_date, daily_chat_score FROM users WHERE user_id = $1 AND guild_id = $2",
             user_id, guild_id
         )
         
@@ -573,6 +573,8 @@ async def get_user_profile(user_id, guild_id=0):
             profession_counts = result['profession_counts']
             activity_stats = result['activity_stats']
             rating_stats = result['rating_stats']
+            last_chat_date = result['last_chat_date']
+            daily_chat_score = result['daily_chat_score'] or 0
             
             # 處理 JSON 數據
             def parse_json_data(data):
@@ -599,6 +601,14 @@ async def get_user_profile(user_id, guild_id=0):
             except:
                 join_date_str = str(join_date)
             
+            # 格式化聊天積分信息
+            today = datetime.now().date()
+            chat_info = ""
+            if last_chat_date == today:
+                chat_info = f"今日已獲得 {daily_chat_score}/{DAILY_CHAT_LIMIT} 分"
+            else:
+                chat_info = "今日尚未獲得聊天積分"
+            
             return {
                 'user_id': user_id,
                 'current_score': current_score,
@@ -606,7 +616,10 @@ async def get_user_profile(user_id, guild_id=0):
                 'join_date': join_date_str,
                 'profession_counts': profession_counts,
                 'activity_stats': activity_stats,
-                'rating_stats': rating_stats
+                'rating_stats': rating_stats,
+                'chat_info': chat_info,
+                'daily_chat_score': daily_chat_score,
+                'last_chat_date': last_chat_date
             }
     else:
         # 使用記憶體緩存
@@ -1353,7 +1366,9 @@ async def profile_slash(interaction: discord.Interaction):
                 'join_date': datetime.now().strftime('%Y-%m-%d'),
                 'profession_counts': {},
                 'activity_stats': {},
-                'rating_stats': {}
+                'rating_stats': {},
+                'chat_info': '尚未開始聊天',
+                'daily_chat_score': 0
             }
         
         current_score = profile['current_score']
@@ -1362,6 +1377,8 @@ async def profile_slash(interaction: discord.Interaction):
         profession_counts = profile['profession_counts']
         activity_stats = profile['activity_stats']
         rating_stats = profile['rating_stats']
+        chat_info = profile.get('chat_info', '')
+        daily_chat_score = profile.get('daily_chat_score', 0)
         
         current_period = get_current_half_month()
         period_data = activity_stats.get(current_period, {})
@@ -1377,6 +1394,13 @@ async def profile_slash(interaction: discord.Interaction):
         # 添加資料庫狀態標記
         db_status = "✅ 資料庫" if db.is_connected else "📝 緩存"
         embed.add_field(name="儲存狀態", value=db_status, inline=True)
+        
+        # 添加聊天積分信息
+        embed.add_field(
+            name="💬 今日聊天積分",
+            value=f"{chat_info}\n每日上限: {DAILY_CHAT_LIMIT} 分\n每句話: +{CHAT_SCORE} 分",
+            inline=True
+        )
         
         attendance_info = (
             f"**當前半月期：** {current_period}\n"
@@ -1466,7 +1490,7 @@ async def profile_slash(interaction: discord.Interaction):
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
-
+        
 @tree.command(name="giveaway", description="創建抽獎活動")
 @app_commands.describe(
     prize="獎品內容",
@@ -3877,5 +3901,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
