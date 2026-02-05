@@ -2547,128 +2547,488 @@ async def attendance_ranking_slash(
 
 # ========== 新增 /blessing 指令 ==========
 
-@tree.command(name="blessing", description="測試今日運程")
+# ========== 新增/blessing指令資料庫 ==========
+BLESSINGS_DATABASE = {
+    "運程等級": {
+        "大吉": {
+            "emoji": "🎉",
+            "chance": 8,
+            "color": 0xFFD700,
+            "descriptions": [
+                "今日紫氣東來，事事順心如意！",
+                "鴻運當頭，心想事成的好日子！",
+                "福星高照，好運連連不斷！",
+                "今日諸事大吉，有如神助！",
+                "運勢如虹，把握良機必有所成！"
+            ],
+            "symbols": ["🎊", "✨", "🏆", "💎", "🌟"]
+        },
+        "吉": {
+            "emoji": "😊",
+            "chance": 25,
+            "color": 0x90EE90,
+            "descriptions": [
+                "今日運氣平順，小確幸不斷！",
+                "會有意外的小驚喜等著你！",
+                "平穩中帶有好運的一天！",
+                "心想事成，願望容易實現！",
+                "運氣不錯，保持積極心態！"
+            ],
+            "symbols": ["🍀", "🌈", "🎯", "💫", "🪄"]
+        },
+        "中平": {
+            "emoji": "😐",
+            "chance": 40,
+            "color": 0x87CEEB,
+            "descriptions": [
+                "平穩的一天，適合按部就班！",
+                "保持平常心，平安就是福！",
+                "無風無浪，穩健前進！",
+                "中庸之道，避免極端決策！",
+                "一切都剛剛好，知足常樂！"
+            ],
+            "symbols": ["⚖️", "🌊", "🕰️", "📊", "🧭"]
+        },
+        "小凶": {
+            "emoji": "😟",
+            "chance": 20,
+            "color": 0xFFA500,
+            "descriptions": [
+                "今日需小心謹慎，避免衝動！",
+                "波折稍多，耐心應對即可！",
+                "小麻煩不斷，但都能解決！",
+                "多一分謹慎，少一分煩惱！",
+                "運勢低迷，宜守不宜攻！"
+            ],
+            "symbols": ["⚠️", "🌀", "🌪️", "💣", "🔮"]
+        },
+        "大凶": {
+            "emoji": "😨",
+            "chance": 7,
+            "color": 0xFF4500,
+            "descriptions": [
+                "諸事不順，建議低調行事！",
+                "運勢低迷，宜靜不宜動！",
+                "危機四伏，謹言慎行為上！",
+                "烏雲密布，等待雨過天晴！",
+                "考驗重重，堅強面對挑戰！"
+            ],
+            "symbols": ["💀", "☠️", "🌩️", "🔥", "🌋"]
+        }
+    },
+    
+    "職業建議": {
+        "坦克": [
+            "今天很適合擔任隊伍前鋒，你的堅韌會帶來勝利！",
+            "防禦時機特別準確，會成為團隊的中流砥柱！",
+            "保護隊友的能力特別突出，大家都很信賴你！",
+            "指揮團隊時思路清晰，帶領大家走向勝利！"
+        ],
+        "输出": [
+            "今天攻擊力大幅提升，是輸出的最佳時機！",
+            "技能連招特別流暢，打出漂亮的傷害吧！",
+            "暴擊率似乎提高了，期待你的精彩表現！",
+            "輸出時機把握得很好，會成為隊伍的MVP！"
+        ],
+        "治疗": [
+            "治療時機把握精準，能拯救關鍵隊友！",
+            "回復量特別可觀，是隊伍的安心保障！",
+            "輔助技能效果提升，團隊續航力大增！",
+            "你的治療總是出現在最需要的時刻！"
+        ],
+        "辅助": [
+            "控制技能命中率提高，能完美牽制敵人！",
+            "團隊增益效果特別顯著，大家都變強了！",
+            "視野掌控能力一流，為隊伍創造機會！",
+            "你的輔助讓整個團隊的戰鬥力提升一個檔次！"
+        ]
+    },
+    
+    "生活建議": {
+        "大吉": [
+            "適合簽訂重要合約或進行投資！",
+            "表白成功率超高，把握機會！",
+            "工作上有晉升或加薪的機會！",
+            "出門可能會遇到貴人或舊友！",
+            "學習新事物效率特別高！",
+            "創意靈感源源不絕！"
+        ],
+        "吉": [
+            "可以嘗試新的挑戰或興趣！",
+            "與朋友聚會會有意外收穫！",
+            "適合規劃未來的目標計畫！",
+            "可能會收到意想不到的禮物！",
+            "工作效率特別高，事半功倍！"
+        ],
+        "中平": [
+            "按部就班完成日常工作！",
+            "保持心情平靜最重要！",
+            "適合整理環境或思緒！",
+            "避免衝動消費或決定！",
+            "多與家人朋友交流！"
+        ],
+        "小凶": [
+            "重要文件記得備份！",
+            "外出注意交通安全！",
+            "避免與人發生爭執！",
+            "謹慎處理財務問題！",
+            "重要決策多思考幾遍！"
+        ],
+        "大凶": [
+            "盡量待在家裡休息！",
+            "避免簽署重要文件！",
+            "出門記得帶傘備用！",
+            "今天適合低調行事！",
+            "重要事情改日再處理！"
+        ]
+    },
+    
+    "愛情運勢": {
+        "大吉": [
+            "單身者：今天可能遇到心儀對象！",
+            "戀愛中：感情甜蜜，適合浪漫約會！",
+            "已婚者：夫妻感情更加融洽！",
+            "告白成功率高達90%！",
+            "會有令人心動的邂逅！"
+        ],
+        "吉": [
+            "單身者：桃花運不錯，多參加社交！",
+            "戀愛中：小驚喜讓感情升溫！",
+            "已婚者：平淡中見真情！",
+            "適合表達心中的愛意！",
+            "會收到溫馨的關心！"
+        ],
+        "中平": [
+            "保持平常心對待感情！",
+            "多溝通少猜疑！",
+            "適合一起做家務增進感情！",
+            "不要計較小事！",
+            "平淡就是幸福！"
+        ],
+        "小凶": [
+            "容易因小事產生誤會！",
+            "需要多一點耐心溝通！",
+            "避免討論敏感話題！",
+            "給彼此一些空間！",
+            "不要衝動說出傷人的話！"
+        ],
+        "大凶": [
+            "容易發生爭吵！",
+            "建議冷靜後再溝通！",
+            "避免做出重要感情決定！",
+            "多體諒對方的難處！",
+            "退一步海闊天空！"
+        ]
+    },
+    
+    "財運建議": {
+        "大吉": [
+            "投資運極佳，小試身手！",
+            "可能會有意外的收入！",
+            "購物時容易撿到便宜！",
+            "財神眷顧，把握機會！",
+            "適合規劃理財計畫！"
+        ],
+        "吉": [
+            "正財穩定，偏財也有機會！",
+            "購物慾望強，但要理性消費！",
+            "可能會收到小紅包！",
+            "儲蓄計畫進展順利！",
+            "適合學習理財知識！"
+        ],
+        "中平": [
+            "收支平衡，穩健為上！",
+            "避免衝動購物！",
+            "定期儲蓄是好習慣！",
+            "檢視開支，做好預算！",
+            "量入為出最重要！"
+        ],
+        "小凶": [
+            "小心財物損失！",
+            "投資需格外謹慎！",
+            "避免借貸給他人！",
+            "檢查帳單避免錯誤！",
+            "重要財務文件保管好！"
+        ],
+        "大凶": [
+            "破財風險高！",
+            "重要投資暫緩！",
+            "避免大額消費！",
+            "謹防詐騙電話！",
+            "現金財物妥善保管！"
+        ]
+    },
+    
+    "幸運物": {
+        "大吉": ["金幣", "水晶", "龍", "鳳凰", "幸運草"],
+        "吉": ["銀飾", "玉佩", "兔子", "蝴蝶", "四葉草"],
+        "中平": ["陶瓷", "木製品", "烏龜", "鴿子", "石頭"],
+        "小凶": ["鐵器", "鏡子", "烏鴉", "蜘蛛", "枯枝"],
+        "大凶": ["玻璃", "尖銳物", "蝙蝠", "蠍子", "斷劍"]
+    },
+    
+    "幸運顏色": {
+        "大吉": ["金色", "紫色", "紅色", "翡翠綠", "寶藍色"],
+        "吉": ["綠色", "藍色", "粉色", "鵝黃色", "淺紫色"],
+        "中平": ["白色", "灰色", "米色", "淺藍色", "卡其色"],
+        "小凶": ["黑色", "深灰色", "褐色", "墨綠色", "暗紅色"],
+        "大凶": ["血紅色", "深黑色", "暗紫色", "鐵灰色", "咖啡色"]
+    },
+    
+    "開場白": [
+        "🔮 正在為 {user} 解讀命運之輪...",
+        "✨ 窺探 {user} 今日的星象軌跡...",
+        "🎭 分析 {user} 的今日氣場能量...",
+        "🌌 探尋 {user} 今日的命運脈絡...",
+        "🧿 解碼 {user} 的今日幸運密語...",
+        "💫 感應 {user} 今日的能量波動...",
+        "🌟 為 {user} 展開今日運勢圖譜...",
+        "🌠 解讀 {user} 的今日命運密碼...",
+        "⚡ 掃描 {user} 今日的運氣頻率...",
+        "🌙 預測 {user} 今日的命運走向..."
+    ],
+    
+    "結語": [
+        "命運負責洗牌，但玩牌的是我們自己。",
+        "好運氣來自好習慣。",
+        "每一天都是新的開始。",
+        "心態決定狀態。",
+        "機會總是留給有準備的人。",
+        "相信自己的選擇。",
+        "微笑是最好的幸運符。",
+        "堅持就是最好的運氣。",
+        "善良的人運氣不會太差。",
+        "今天就是最好的禮物。"
+    ]
+}
+
+def get_user_profession(user_id, guild_id):
+    """獲取用戶的主要職業"""
+    # 這裡可以從資料庫獲取用戶最常使用的職業
+    # 暫時先隨機返回一個職業
+    professions = ["坦克", "输出", "治疗", "辅助"]
+    return random.choice(professions)
+
+# ========== 改進版 /blessing 指令 ==========
+
+@tree.command(name="blessing", description="測試今日運程（豐富版）")
 async def blessing_slash(interaction: discord.Interaction):
-    """測試運程"""
+    """測試運程（豐富版）"""
     await interaction.response.defer()
     
     try:
-        # 運程選項和機率
-        blessings = {
-            "大吉": {"emoji": "🎉", "chance": 10, "color": 0xFFD700, "description": "今日事事順利，心想事成！"},
-            "吉": {"emoji": "😊", "chance": 25, "color": 0x90EE90, "description": "今日運氣不錯，會有好事發生。"},
-            "中尚": {"emoji": "😐", "chance": 40, "color": 0x87CEEB, "description": "平平安安的一天，穩紮穩打。"},
-            "凶": {"emoji": "😟", "chance": 20, "color": 0xFFA500, "description": "今日需小心謹慎，避免重大決定。"},
-            "大凶": {"emoji": "😨", "chance": 5, "color": 0xFF4500, "description": "諸事不順，建議低調行事。"}
+        # 隨機選擇開場白
+        opening = random.choice(BLESSINGS_DATABASE["開場白"]).format(user=interaction.user.name)
+        
+        # 先發送一個有趣的等待訊息
+        waiting_embed = discord.Embed(
+            title=f"🔮 占卜中...",
+            description=opening,
+            color=0x7289DA
+        )
+        waiting_embed.set_thumbnail(url="https://cdn.discordapp.com/emojis/856919111867498507.gif" if interaction.user.avatar else None)
+        
+        await interaction.followup.send(embed=waiting_embed)
+        message = await interaction.original_response()
+        
+        # 模擬占卜過程
+        await asyncio.sleep(1.5)
+        
+        # 運程選擇
+        blessing_types = list(BLESSINGS_DATABASE["運程等級"].keys())
+        weights = [BLESSINGS_DATABASE["運程等級"][b]["chance"] for b in blessing_types]
+        result = random.choices(blessing_types, weights=weights, k=1)[0]
+        blessing_info = BLESSINGS_DATABASE["運程等級"][result]
+        
+        # 獲取用戶職業（如果有）
+        user_profession = get_user_profession(interaction.user.id, get_guild_id(interaction))
+        
+        # 隨機選擇內容
+        description = random.choice(blessing_info["descriptions"])
+        symbol = random.choice(blessing_info["symbols"])
+        
+        # 職業建議
+        profession_advice = ""
+        if user_profession in BLESSINGS_DATABASE["職業建議"]:
+            profession_advice = random.choice(BLESSINGS_DATABASE["職業建議"][user_profession])
+        
+        # 生活建議
+        life_advices = random.sample(BLESSINGS_DATABASE["生活建議"][result], min(3, len(BLESSINGS_DATABASE["生活建議"][result])))
+        
+        # 愛情運勢
+        love_fortune = random.choice(BLESSINGS_DATABASE["愛情運勢"][result])
+        
+        # 財運建議
+        money_advice = random.choice(BLESSINGS_DATABASE["財運建議"][result])
+        
+        # 幸運物和顏色
+        lucky_item = random.choice(BLESSINGS_DATABASE["幸運物"][result])
+        lucky_color = random.choice(BLESSINGS_DATABASE["幸運顏色"][result])
+        
+        # 時間運勢
+        time_fortune = {
+            "上午": random.choice(["吉", "平", "凶"]),
+            "下午": random.choice(["吉", "平", "凶"]),
+            "晚上": random.choice(["吉", "平", "凶"])
         }
         
-        # 隨機選擇
-        choices = list(blessings.keys())
-        weights = [blessings[b]["chance"] for b in choices]
-        result = random.choices(choices, weights=weights, k=1)[0]
-        blessing_info = blessings[result]
+        # 幸運數字（1-99）
+        lucky_numbers = sorted(random.sample(range(1, 100), 3))
         
-        # 生成隨機建議
-        suggestions = {
-            "大吉": [
-                "適合進行投資或重要決策",
-                "告白成功率大幅提升",
-                "工作上會有意外收穫",
-                "出門可能會遇到貴人"
-            ],
-            "吉": [
-                "可以嘗試新的挑戰",
-                "與朋友聚會會有驚喜",
-                "學習效率特別高",
-                "適合規劃未來計畫"
-            ],
-            "中尚": [
-                "按部就班完成工作",
-                "保持平常心最重要",
-                "適合整理環境或思緒",
-                "避免衝動消費"
-            ],
-            "凶": [
-                "重要文件記得備份",
-                "外出注意交通安全",
-                "避免與人發生爭執",
-                "謹慎處理財務問題"
-            ],
-            "大凶": [
-                "盡量待在家裡休息",
-                "避免簽署重要文件",
-                "出門記得帶傘",
-                "今天適合低調行事"
-            ]
-        }
+        # 幸運方向
+        directions = ["東", "南", "西", "北", "東南", "西南", "東北", "西北"]
+        lucky_direction = random.choice(directions)
         
-        user_suggestions = random.sample(suggestions[result], min(3, len(suggestions[result])))
+        # 結語
+        closing = random.choice(BLESSINGS_DATABASE["結語"])
         
-        # 創建嵌入訊息
+        # 創建最終嵌入訊息
         embed = discord.Embed(
-            title=f"{blessing_info['emoji']} {interaction.user.name} 的今日運程",
-            description=f"**{result}**\n{blessing_info['description']}",
+            title=f"{blessing_info['emoji']} {symbol} {interaction.user.name} 的今日運程 {symbol}",
+            description=f"**{result}**\n\n{description}",
             color=blessing_info['color']
         )
         
-        # 添加詳細信息
+        # 運程分析
         embed.add_field(
             name="📊 運程分析",
             value=f"**運程等級：** {result}\n"
                   f"**出現機率：** {blessing_info['chance']}%\n"
-                  f"**幸運顏色：** {'金色' if result == '大吉' else '綠色' if result == '吉' else '藍色' if result == '中尚' else '橙色' if result == '凶' else '紅色'}",
+                  f"**幸運顏色：** {lucky_color}\n"
+                  f"**幸運物品：** {lucky_item}",
             inline=True
         )
         
+        # 時間運勢
         embed.add_field(
-            name="🕰️ 最佳時段",
-            value=f"**上午：** {random.choice(['吉', '平', '凶'])}\n"
-                  f"**下午：** {random.choice(['吉', '平', '凶'])}\n"
-                  f"**晚上：** {random.choice(['吉', '平', '凶'])}",
+            name="🕰️ 時段運勢",
+            value=f"**上午：** {time_fortune['上午']}\n"
+                  f"**下午：** {time_fortune['下午']}\n"
+                  f"**晚上：** {time_fortune['晚上']}",
             inline=True
         )
         
-        # 添加建議
-        suggestions_text = ""
-        for i, suggestion in enumerate(user_suggestions, 1):
-            suggestions_text += f"{i}. {suggestion}\n"
+        # 幸運數字和方向
+        embed.add_field(
+            name="🎲 幸運指引",
+            value=f"**幸運數字：** {', '.join(map(str, lucky_numbers))}\n"
+                  f"**幸運方向：** {lucky_direction}",
+            inline=True
+        )
+        
+        # 職業建議（如果用戶有主要職業）
+        if profession_advice:
+            embed.add_field(
+                name=f"🎮 {user_profession}專屬建議",
+                value=profession_advice,
+                inline=False
+            )
+        
+        # 生活建議
+        life_text = ""
+        for i, advice in enumerate(life_advices, 1):
+            life_text += f"{i}. {advice}\n"
         
         embed.add_field(
-            name="💡 今日建議",
-            value=suggestions_text,
+            name="💡 今日生活建議",
+            value=life_text,
             inline=False
         )
         
-        # 添加幸運數字和方向
+        # 愛情運勢
         embed.add_field(
-            name="🎲 幸運數字",
-            value=f"{random.randint(1, 9)}",
+            name="💖 愛情運勢",
+            value=love_fortune,
             inline=True
         )
         
+        # 財運建議
         embed.add_field(
-            name="🧭 幸運方向",
-            value=random.choice(["東", "南", "西", "北"]),
+            name="💰 財運指南",
+            value=money_advice,
             inline=True
         )
         
-        # 隨機名言
-        quotes = [
-            "命運負責洗牌，但玩牌的是我們自己。",
-            "好運氣來自好習慣。",
-            "每一天都是新的開始。",
-            "心態決定狀態。"
-        ]
+        # 運勢提醒
+        if result in ["小凶", "大凶"]:
+            warning_emojis = ["⚠️", "🔮", "🌪️", "💣"]
+            warning = random.choice([
+                "今天需要格外小心！",
+                "保持警覺，謹慎行事！",
+                "低調是今天的護身符！",
+                "耐心等待運勢好轉！"
+            ])
+            embed.add_field(
+                name=f"{random.choice(warning_emojis)} 特別提醒",
+                value=warning,
+                inline=False
+            )
+        elif result in ["大吉", "吉"]:
+            celebration_emojis = ["🎊", "✨", "🏆", "💎"]
+            celebration = random.choice([
+                "把握今天的好運氣！",
+                "積極行動會有回報！",
+                "今天是展現自己的好日子！",
+                "好運要與朋友分享！"
+            ])
+            embed.add_field(
+                name=f"{random.choice(celebration_emojis)} 好運提示",
+                value=celebration,
+                inline=False
+            )
         
-        embed.set_footer(text=random.choice(quotes))
-        embed.set_thumbnail(url=interaction.user.avatar.url if interaction.user.avatar else None)
+        # 添加趣味統計
+        embed.add_field(
+            name="📈 今日趣味統計",
+            value=f"**今日幸運指數：** {random.randint(50, 100)}%\n"
+                  f"**正能量指數：** {random.randint(60, 100)}%\n"
+                  f"**驚喜機率：** {random.randint(10, 80)}%",
+            inline=False
+        )
         
-        await interaction.followup.send(embed=embed)
+        embed.set_footer(text=closing)
+        
+        if interaction.user.avatar:
+            embed.set_thumbnail(url=interaction.user.avatar.url)
+        
+        # 使用編輯更新原本的等待訊息
+        await message.edit(embed=embed)
+        
+        # 根據運程結果發送不同的反應
+        try:
+            if result == "大吉":
+                await message.add_reaction("🎉")
+                await message.add_reaction("✨")
+            elif result == "吉":
+                await message.add_reaction("😊")
+                await message.add_reaction("🍀")
+            elif result == "中平":
+                await message.add_reaction("😐")
+                await message.add_reaction("⚖️")
+            elif result == "小凶":
+                await message.add_reaction("😟")
+                await message.add_reaction("⚠️")
+            elif result == "大凶":
+                await message.add_reaction("😨")
+                await message.add_reaction("💀")
+        except:
+            pass
+        
+        # 發送額外的趣味訊息（20%機率）
+        if random.random() < 0.2:
+            fun_facts = [
+                "🔮 小雲占卜小知識：每天的第一次占卜最準確！",
+                "✨ 溫馨提示：運程僅供娛樂，實際生活更重要！",
+                "💫 幸運小秘訣：保持微笑會帶來好運氣！",
+                "🌟 趣味統計：大吉出現機率僅8%，你很幸運！",
+                "🎭 今日運程解讀完成，期待你的精彩一天！"
+            ]
+            await message.channel.send(random.choice(fun_facts), delete_after=10)
         
     except Exception as e:
         error_embed = discord.Embed(
             title="❌ 運程測試失敗",
-            description=f"錯誤：{str(e)}",
+            description=f"占卜過程中出現錯誤：{str(e)[:100]}",
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
@@ -3904,6 +4264,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
