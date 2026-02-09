@@ -1417,25 +1417,35 @@ async def profile_slash(interaction: discord.Interaction):
             inline=False
         )
         
-        score_info = f"**當前積分：** {current_score} 分\n"
+       score_info = f"**當前積分：** {current_score} 分\n"
         score_info += f"**總獲得積分：** {total_score} 分\n"
         score_info += f"**可用積分：** {current_score} 分\n\n"
         score_info += f"**積分規則：**\n"
-score_info += f"• 聊天：每句話 +{CHAT_SCORE}分（每日上限 {DAILY_CHAT_LIMIT}分）\n"
-score_info += f"• 簽到：+{SIGNUP_SCORE}分\n"
-for profession, bonus in PROFESSION_BONUS.items():
-    if bonus > 0:
-        score_info += f"• {profession}：+{bonus}分\n"
-score_info += f"• 優秀：+{RATING_SCORES['優秀']}分\n"
-score_info += f"• 良好：+{RATING_SCORES['良好']}分\n"
-score_info += f"• 普通：{RATING_SCORES['普通']}分（預設）\n"
-score_info += f"• 不合格：{RATING_SCORES['不合格']}分"
+        score_info += f"• 聊天：每句話 +{CHAT_SCORE}分（每日上限 {DAILY_CHAT_LIMIT}分）\n"
+        score_info += f"• 簽到：+{SIGNUP_SCORE}分\n"
+        for profession, bonus in PROFESSION_BONUS.items():
+            if bonus > 0:
+                score_info += f"• {profession}：+{bonus}分\n"
+        score_info += f"• 優秀：+{RATING_SCORES['優秀']}分\n"
+        score_info += f"• 良好：+{RATING_SCORES['良好']}分\n"
+        score_info += f"• 普通：{RATING_SCORES['普通']}分（預設）\n"
+        score_info += f"• 不合格：{RATING_SCORES['不合格']}分"
         
         embed.add_field(
             name="💰 積分統計",
             value=score_info,
             inline=False
         )
+        
+        # ... 其他程式碼 ...
+        
+    except Exception as e:  # <-- 確保有這個 except 區塊
+        error_embed = discord.Embed(
+            title="❌ 發生錯誤",
+            description=f"無法讀取用戶資料：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
         
         if profession_counts:
             profession_info = ""
@@ -4594,6 +4604,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
