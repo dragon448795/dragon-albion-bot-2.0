@@ -1417,7 +1417,8 @@ async def profile_slash(interaction: discord.Interaction):
             inline=False
         )
         
-       score_info = f"**當前積分：** {current_score} 分\n"
+        # 修正這裡的縮排問題
+        score_info = f"**當前積分：** {current_score} 分\n"
         score_info += f"**總獲得積分：** {total_score} 分\n"
         score_info += f"**可用積分：** {current_score} 分\n\n"
         score_info += f"**積分規則：**\n"
@@ -1436,6 +1437,61 @@ async def profile_slash(interaction: discord.Interaction):
             value=score_info,
             inline=False
         )
+        
+        if profession_counts:
+            profession_info = ""
+            total_plays = sum(profession_counts.values())
+            for profession, count in profession_counts.items():
+                percentage = (count / total_plays * 100) if total_plays > 0 else 0
+                profession_info += f"**{profession}：** {count}次 ({percentage:.1f}%)\n"
+        else:
+            profession_info = "尚未記錄職業數據"
+        
+        embed.add_field(
+            name="🎮 職業統計",
+            value=profession_info,
+            inline=False
+        )
+        
+        if rating_stats:
+            rating_info = ""
+            total_ratings = sum(rating_stats.values())
+            total_rating_score = 0
+            
+            for rating_type in ["優秀", "良好", "普通", "不合格"]:
+                count = rating_stats.get(rating_type, 0)
+                if count > 0:
+                    percentage = (count / total_ratings * 100) if total_ratings > 0 else 0
+                    score = RATING_SCORES.get(rating_type, 0)
+                    rating_info += f"**{rating_type}：** {count}次 ({percentage:.1f}%)\n"
+                    total_rating_score += count * score
+            
+            if total_ratings > 0:
+                rating_info += f"\n**評核總獲得積分：** {total_rating_score} 分"
+        else:
+            rating_info = "尚未有評核記錄"
+        
+        embed.add_field(
+            name="⭐ 評核統計",
+            value=rating_info,
+            inline=False
+        )
+        
+        embed.add_field(name="用戶ID", value=f"`{user_id}`", inline=True)
+        embed.add_field(name="加入日期", value=join_date_str, inline=True)
+        
+        if interaction.user.avatar:
+            embed.set_thumbnail(url=interaction.user.avatar.url)
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 發生錯誤",
+            description=f"無法讀取用戶資料：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
         
         # ... 其他程式碼 ...
         
@@ -4604,6 +4660,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
