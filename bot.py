@@ -2198,7 +2198,238 @@ async def sync_slash(interaction: discord.Interaction):
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 # ========== 用戶指令 (10個) ==========
+# ========== RPG 診斷指令 ==========
 
+@tree.command(name="rpg_debug", description="RPG 系統診斷")
+async def rpg_debug_slash(interaction: discord.Interaction):
+    """RPG 系統診斷"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        user_id = interaction.user.id
+        
+        embed = discord.Embed(
+            title="🔧 RPG 系統診斷報告",
+            color=0x7289DA
+        )
+        
+        # 1. 檢查資料庫連接
+        if db.is_connected:
+            embed.add_field(
+                name="🔌 資料庫連接",
+                value="✅ 正常",
+                inline=True
+            )
+            
+            # 測試查詢
+            try:
+                test_result = await db.fetchval("SELECT 1")
+                embed.add_field(
+                    name="🔍 查詢測試",
+                    value=f"✅ 成功 (結果: {test_result})",
+                    inline=True
+                )
+            except Exception as e:
+                embed.add_field(
+                    name="🔍 查詢測試",
+                    value=f"❌ 失敗: {str(e)[:50]}",
+                    inline=True
+                )
+        else:
+            embed.add_field(
+                name="🔌 資料庫連接",
+                value="❌ 未連接",
+                inline=True
+            )
+        
+        # 2. 檢查 RPG 表格是否存在
+        if db.is_connected:
+            try:
+                # 檢查主要 RPG 表格
+                tables_to_check = [
+                    "rpg_players",
+                    "rpg_items", 
+                    "rpg_inventory",
+                    "rpg_monsters"
+                ]
+                
+                table_status = []
+                for table in tables_to_check:
+                    exists = await db.fetchval(f"""
+                        SELECT EXISTS (
+                            SELECT FROM information_schema.tables 
+                            WHERE table_schema = 'public' 
+                            AND table_name = '{table}'
+                        )
+                    """)
+                    table_status.append((table, exists))
+                
+                tables_text = ""
+                for table, exists in table_status:
+                    status = "✅" if exists else "❌"
+                    tables_text += f"{status} {table}\n"
+                
+                embed.add_field(
+                    name="📋 RPG 資料表狀態",
+                    value=tables_text,
+                    inline=False
+                )
+                
+            except Exception as e:
+                embed.add_field(
+                    name="📋 RPG 資料表檢查",
+                    value=f"❌ 檢查失敗: {str(e)[:100]}",
+                    inline=False
+                )
+        
+        # 3. 檢查角色是否存在
+        if db.is_connected:
+            try:
+                player = await db.fetchrow(
+                    "SELECT * FROM rpg_players WHERE user_id = $1",
+                    user_id
+                )
+                
+                if player:
+                    embed.add_field(
+                        name="👤 你的角色狀態",
+                        value=f"✅ 角色存在\n名稱: {player.get('nickname', '未知')}\n等級: {player.get('level', 1)}",
+                        inline=True
+                    )
+                    
+                    # 檢查裝備
+                    weapon_name = "無"
+                    if player.get('weapon_id'):
+                        weapon = await db.fetchrow(
+                            "SELECT name FROM rpg_items WHERE id = $1",
+                            player['weapon_id']
+                        )
+                        if weapon:
+                            weapon_name = weapon['name']
+                    
+                    embed.add_field(
+                        name="⚔️ 當前武器",
+                        value=weapon_name,
+                        inline=True
+                    )
+                else:
+                    embed.add_field(
+                        name="👤 你的角色狀態",
+                        value="❌ 角色不存在\n使用 `/rpg_start` 創建角色",
+                        inline=True
+                    )
+                    
+            except Exception as e:
+                embed.add_field(
+                    name="👤 角色檢查",
+                    value=f"❌ 檢查失敗: {str(e)[:100]}",
+                    inline=True
+                )
+        
+        # 4. 創建角色測試
+        embed.add_field(
+            name="🔧 快速測試",
+            value="點擊下方按鈕測試角色創建",
+            inline=False
+        )
+        
+        await interaction.followup.send(embed=embed, ephemeral=True, view=RPGDebugView(user_id))
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ 診斷失敗: {str(e)[:200]}", ephemeral=True)
+
+class RPGDebugView(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+    
+    @discord.ui.button(label="測試創建角色", style=discord.ButtonStyle.primary, emoji="🧪")
+    async def test_create_character(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 這不是你的診斷！", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # 直接執行創建角色
+            success = await create_rpg_player_simple(interaction.user.id, "測試角色")
+            
+            if success:
+                await interaction.followup.send("✅ 測試創建成功！請使用 `/rpg_status` 查看", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ 測試創建失敗", ephemeral=True)
+                
+        except Exception as e:
+            await interaction.followup.send(f"❌ 測試失敗: {str(e)[:100]}", ephemeral=True)
+    
+    @discord.ui.button(label="查看所有用戶", style=discord.ButtonStyle.secondary, emoji="👥")
+    async def view_all_players(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 這不是你的診斷！", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            players = await db.fetch(
+                "SELECT user_id, nickname, level FROM rpg_players ORDER BY level DESC LIMIT 10"
+            )
+            
+            if players:
+                player_list = "\n".join([f"• {p['nickname']} (ID: {p['user_id']}) Lv.{p['level']}" for p in players])
+                await interaction.followup.send(f"**👥 RPG 玩家列表 (前10名)**\n{player_list}", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ 資料庫中沒有任何 RPG 玩家", ephemeral=True)
+                
+        except Exception as e:
+            await interaction.followup.send(f"❌ 查詢失敗: {str(e)[:100]}", ephemeral=True)
+
+async def create_rpg_player_simple(user_id: int, nickname: str = None) -> bool:
+    """簡化版角色創建（用於測試）"""
+    try:
+        username = nickname or f"冒險者{user_id}"
+        
+        print(f"🧪 測試創建角色: {user_id} - {username}")
+        
+        # 直接插入，不檢查是否已存在
+        await db.execute('''
+            INSERT INTO rpg_players (
+                user_id, nickname, level, exp, max_exp,
+                vitality, speed, strength, intelligence, carrying_capacity,
+                current_hp, max_hp, current_mp, max_mp,
+                house_type, storage_capacity,
+                current_map, current_layer, is_in_town
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        ''',
+            user_id,
+            username,
+            1,      # level
+            0,      # exp
+            100,    # max_exp
+            10,     # vitality
+            10,     # speed
+            10,     # strength
+            10,     # intelligence
+            10,     # carrying_capacity
+            100,    # current_hp
+            100,    # max_hp
+            50,     # current_mp
+            50,     # max_mp
+            'orphanage',    # house_type
+            20,             # storage_capacity
+            '新手森林',     # current_map
+            1,              # current_layer
+            True            # is_in_town
+        )
+        
+        print(f"✅ 測試創建成功: {user_id}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 測試創建失敗: {e}")
+        return False
+        
 @tree.command(name="help", description="顯示幫助訊息")
 async def help_slash(interaction: discord.Interaction):
     """顯示幫助"""
@@ -7367,6 +7598,7 @@ class Bot:
             return self.rpg_adventure(user_id)
         else:
             return "未知的 RPG 指令"
+
 
 
 
