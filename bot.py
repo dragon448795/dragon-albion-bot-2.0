@@ -7263,6 +7263,49 @@ if __name__ == "__main__":
         print(f"❌ 機器人啟動失敗: {e}")
         traceback.print_exc()
 
+# 在你的 Bot.py 中新增：
+from database import RPGDatabase
+from monsters import MonsterSystem
+from items import ItemSystem
+from combat import CombatSystem
+from party import PartySystem
+
+class Bot:
+    def __init__(self):
+        # ... 現有代碼 ...
+        
+        # 新增 RPG 系統
+        self.rpg_db = RPGDatabase()
+        self.rpg_monsters = MonsterSystem(self.rpg_db)
+        self.rpg_items = ItemSystem(self.rpg_db)
+        self.rpg_combat = CombatSystem(self.rpg_db)
+        self.rpg_party = PartySystem(self.rpg_db)
+        
+    def response(self, user_id: str, msg: str) -> str:
+        # ... 現有代碼 ...
+        
+        # 添加 RPG 指令處理
+        if msg.startswith("!rpg"):
+            return self.handle_rpg_command(user_id, msg)
+            
+    def handle_rpg_command(self, user_id: str, msg: str) -> str:
+        """處理 RPG 指令"""
+        parts = msg.split()
+        if len(parts) < 2:
+            return "RPG 指令：!rpg start, !rpg status, !rpg party, !rpg adventure"
+            
+        command = parts[1].lower()
+        
+        if command == "start":
+            return self.rpg_start(user_id)
+        elif command == "status":
+            return self.rpg_status(user_id)
+        elif command == "party":
+            return self.rpg_party_status(user_id)
+        elif command == "adventure":
+            return self.rpg_adventure(user_id)
+        else:
+            return "未知的 RPG 指令"
 
 
 
