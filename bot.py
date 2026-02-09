@@ -2707,80 +2707,79 @@ async def score_draw_slash(interaction: discord.Interaction):
             async def five_hundred_points(self, interaction: discord.Interaction, button: discord.ui.Button):
                 await self.process_draw(interaction, 500)
             
-           async def process_draw(self, interaction: discord.Interaction, score_cost: int):
-    if interaction.user.id != self.user_id:
-        await interaction.response.send_message("❌ 這不是你的抽獎！", ephemeral=True)
-        return
-    
-    current_score, _ = await get_user_score(interaction.user.id, self.guild_id)
-    if current_score < score_cost:
-        await interaction.response.send_message(
-            f"❌ 積分不足！需要 {score_cost} 分，你目前有 {current_score} 分",
-            ephemeral=True
-        )
-        return
-    
-    weights = {
-        50: {"綠箱": 70, "藍箱": 25, "紫箱": 4.5, "金箱": 0.5},
-        100: {"綠箱": 50, "藍箱": 40, "紫箱": 9, "金箱": 1},
-        500: {"綠箱": 10, "藍箱": 65, "紫箱": 20, "金箱": 5}
-    }
-    
-    box_weights = weights[score_cost]
-    box_types = list(box_weights.keys())
-    box_weights_list = list(box_weights.values())
-    selected_box = random.choices(box_types, weights=box_weights_list, k=1)[0]
-    
-    result = await db.fetchrow(
-        "SELECT id, prize_name FROM prize_pool WHERE box_level = $1 AND remaining > 0 AND guild_id = $2 ORDER BY RANDOM() LIMIT 1",
-        selected_box, self.guild_id
-    )
-    
-    if not result:
-        await interaction.response.send_message(f"❌ {selected_box}中沒有可用獎品！", ephemeral=True)
-        return
-    
-    prize_id = result['id']
-    prize_name = result['prize_name']
-    
-    # ========== 修正這行代碼的縮排 ==========
-    await update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎: {score_cost}分", self.guild_id)
-    
-    await db.execute(
-        "UPDATE prize_pool SET remaining = remaining - 1 WHERE id = $1",
-        prize_id
-    )
-    
-    await db.execute(
-        '''
-        INSERT INTO score_draws (creator_id, score_cost, box_level, winner_prize, winner_id, guild_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ''',
-        interaction.user.id, score_cost, selected_box, prize_name, interaction.user.id, self.guild_id
-    )
-    
-    colors = {
-        "綠箱": 0x00FF00,
-        "藍箱": 0x0000FF,
-        "紫箱": 0x800080,
-        "金箱": 0xFFD700
-    }
-    
-    result_embed = discord.Embed(
-        title=f"🎉 抽獎結果：{selected_box} 🎉",
-        description=f"花費 {score_cost} 積分進行抽獎",
-        color=colors.get(selected_box, 0x7289DA)
-    )
-    
-    result_embed.add_field(name="🎁 獲得的獎品", value=prize_name, inline=True)
-    result_embed.add_field(name="💰 消耗積分", value=f"-{score_cost} 分", inline=True)
-    result_embed.add_field(name="🎲 箱子類型", value=selected_box, inline=True)
-    
-    current_score, total_score = await get_user_score(interaction.user.id, self.guild_id)
-    result_embed.add_field(name="💎 剩餘積分", value=f"{current_score} 分", inline=True)
-    
-    await interaction.response.edit_message(embed=result_embed, view=None)
-    await interaction.followup.send(f"🎉 <@{interaction.user.id}> 使用了 {score_cost} 積分抽獎，獲得了 **{prize_name}**！")
+            async def process_draw(self, interaction: discord.Interaction, score_cost: int):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的抽獎！", ephemeral=True)
+                    return
+                
+                current_score, _ = await get_user_score(interaction.user.id, self.guild_id)
+                if current_score < score_cost:
+                    await interaction.response.send_message(
+                        f"❌ 積分不足！需要 {score_cost} 分，你目前有 {current_score} 分",
+                        ephemeral=True
+                    )
+                    return
+                
+                weights = {
+                    50: {"綠箱": 70, "藍箱": 25, "紫箱": 4.5, "金箱": 0.5},
+                    100: {"綠箱": 50, "藍箱": 40, "紫箱": 9, "金箱": 1},
+                    500: {"綠箱": 10, "藍箱": 65, "紫箱": 20, "金箱": 5}
+                }
+                
+                box_weights = weights[score_cost]
+                box_types = list(box_weights.keys())
+                box_weights_list = list(box_weights.values())
+                selected_box = random.choices(box_types, weights=box_weights_list, k=1)[0]
+                
+                result = await db.fetchrow(
+                    "SELECT id, prize_name FROM prize_pool WHERE box_level = $1 AND remaining > 0 AND guild_id = $2 ORDER BY RANDOM() LIMIT 1",
+                    selected_box, self.guild_id
+                )
+                
+                if not result:
+                    await interaction.response.send_message(f"❌ {selected_box}中沒有可用獎品！", ephemeral=True)
+                    return
+                
+                prize_id = result['id']
+                prize_name = result['prize_name']
+                
+                await update_user_score(interaction.user.id, interaction.user.name, -score_cost, f"積分抽獎: {score_cost}分", self.guild_id)
+                
+                await db.execute(
+                    "UPDATE prize_pool SET remaining = remaining - 1 WHERE id = $1",
+                    prize_id
+                )
+                
+                await db.execute(
+                    '''
+                    INSERT INTO score_draws (creator_id, score_cost, box_level, winner_prize, winner_id, guild_id)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ''',
+                    interaction.user.id, score_cost, selected_box, prize_name, interaction.user.id, self.guild_id
+                )
+                
+                colors = {
+                    "綠箱": 0x00FF00,
+                    "藍箱": 0x0000FF,
+                    "紫箱": 0x800080,
+                    "金箱": 0xFFD700
+                }
+                
+                result_embed = discord.Embed(
+                    title=f"🎉 抽獎結果：{selected_box} 🎉",
+                    description=f"花費 {score_cost} 積分進行抽獎",
+                    color=colors.get(selected_box, 0x7289DA)
+                )
+                
+                result_embed.add_field(name="🎁 獲得的獎品", value=prize_name, inline=True)
+                result_embed.add_field(name="💰 消耗積分", value=f"-{score_cost} 分", inline=True)
+                result_embed.add_field(name="🎲 箱子類型", value=selected_box, inline=True)
+                
+                current_score, total_score = await get_user_score(interaction.user.id, self.guild_id)
+                result_embed.add_field(name="💎 剩餘積分", value=f"{current_score} 分", inline=True)
+                
+                await interaction.response.edit_message(embed=result_embed, view=None)
+                await interaction.followup.send(f"🎉 <@{interaction.user.id}> 使用了 {score_cost} 積分抽獎，獲得了 **{prize_name}**！")
         
         await interaction.followup.send(embed=embed, view=ScoreDrawView(interaction.user.id, guild_id))
         
@@ -2791,7 +2790,6 @@ async def score_draw_slash(interaction: discord.Interaction):
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
-
 @tree.command(name="score_transfer", description="轉移積分給其他用戶")
 @app_commands.describe(
     user="要轉移給誰",
@@ -6703,4 +6701,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 機器人啟動失敗: {e}")
         traceback.print_exc()
+
 
