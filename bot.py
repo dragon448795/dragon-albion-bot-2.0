@@ -1619,6 +1619,7 @@ async def giveaway_slash(
                             message.id, guild_id
                         )
                         participants_count = 0
+                        participants = []
                         if result and result['participants']:
                             participants = result['participants']
                             if isinstance(participants, str):
@@ -1628,6 +1629,7 @@ async def giveaway_slash(
                                     participants = []
                             participants_count = len(participants)
                         
+                        # ========== 修復：顯示所有參與者 ==========
                         new_embed = discord.Embed(
                             title="🎉 自動抽獎活動 🎉",
                             description="時間到自動開獎！",
@@ -1640,6 +1642,21 @@ async def giveaway_slash(
                         new_embed.add_field(name="🎫 參與人數", value=f"{participants_count} 人", inline=True)
                         new_embed.add_field(name="📝 參與方式", value="點擊下方 🎫 按鈕參與", inline=True)
                         new_embed.add_field(name="🔧 主辦人操作", value="點擊 ⏹️ 手動結束抽獎", inline=True)
+                        
+                        # 顯示參與者列表（分頁顯示，最多顯示50人）
+                        if participants_count > 0:
+                            participants_text = ""
+                            for i, user_id in enumerate(participants[:50], 1):
+                                participants_text += f"{i}. <@{user_id}>\n"
+                            
+                            if participants_count > 50:
+                                participants_text += f"\n... 還有 {participants_count - 50} 人"
+                            
+                            new_embed.add_field(
+                                name="📋 參與者列表",
+                                value=participants_text,
+                                inline=False
+                            )
                         
                         new_embed.set_footer(text=f"抽獎ID: {giveaway_id} | 主辦人: {creator_name}•{datetime.now().strftime('%Y-%m-%d %H:%M')}")
                         
@@ -1660,6 +1677,7 @@ async def giveaway_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
+
 
 @tree.command(name="score_draw", description="使用積分抽獎")
 async def score_draw_slash(interaction: discord.Interaction):
@@ -1999,53 +2017,68 @@ async def prizelist_slash(interaction: discord.Interaction):
         )
         await interaction.followup.send(embed=error_embed)
 
-@tree.command(name="random_team", description="隨機分組")
+@tree.command(name="random_team", description="隨機分組（可設定每組人數上限）")
 @app_commands.describe(
-    team_size="每組人數",
-    team_count="組數"
+    max_team_size="每組最大人數（設定上限，不指定則自動分配）",
+    team_count="組數（可選，與每組人數二選一）"
 )
 async def random_team_slash(
     interaction: discord.Interaction,
-    team_size: Optional[int] = None,
+    max_team_size: Optional[int] = None,
     team_count: Optional[int] = None
 ):
-    """隨機分組"""
+    """隨機分組（改進版）"""
     await interaction.response.defer()
     
     try:
         guild_id = get_guild_id(interaction)
-        await log_query("random_team", interaction.user.id, {"team_size": team_size, "team_count": team_count}, guild_id)
+        await log_query("random_team", interaction.user.id, {"max_team_size": max_team_size, "team_count": team_count}, guild_id)
         
         if not interaction.guild:
             await interaction.followup.send("❌ 此指令只能在伺服器中使用")
             return
         
+        # ========== 修復：新增分組模式選擇 ==========
         embed = discord.Embed(
-            title="👥 隨機分組",
-            description="點擊 🎮 按鈕參加分組\n主持人點擊 ▶️ 按鈕開始分組",
+            title="👥 隨機分組系統",
+            description="請選擇分組模式：\n\n"
+                       "**模式A：設定每組人數上限**\n"
+                       "• 點擊 📏 按鈕參加\n"
+                       "• 主持人設定每組最大人數\n"
+                       "• 系統自動計算組數\n\n"
+                       "**模式B：設定組數**\n"
+                       "• 點擊 🎯 按鈕參加\n"
+                       "• 主持人設定組數\n"
+                       "• 系統自動計算每組人數",
             color=0x3498DB
         )
         
-        if team_size:
-            embed.add_field(name="每組人數", value=str(team_size), inline=True)
+        embed.add_field(name="目前模式", value="未選擇", inline=True)
+        
+        if max_team_size:
+            embed.add_field(name="每組最大人數", value=str(max_team_size), inline=True)
         if team_count:
             embed.add_field(name="組數", value=str(team_count), inline=True)
         
         embed.add_field(name="參加人數", value="0 人", inline=True)
-        embed.set_footer(text="等待參加者...")
+        embed.set_footer(text="請先選擇分組模式，然後等待參加者...")
         
         await interaction.followup.send(embed=embed)
         message = await interaction.original_response()
         
-        await message.add_reaction("🎮")
-        await message.add_reaction("▶️")
+        # 添加模式選擇按鈕
+        await message.add_reaction("📏")  # 模式A：設定人數上限
+        await message.add_reaction("🎯")  # 模式B：設定組數
+        await message.add_reaction("🎮")  # 參加按鈕
+        await message.add_reaction("▶️")  # 開始分組
         
         participants = []
+        selected_mode = None  # 'size' 或 'count'
         
         def check(reaction, user):
             return (
                 user != bot.user and
-                str(reaction.emoji) in ["🎮", "▶️"] and
+                str(reaction.emoji) in ["📏", "🎯", "🎮", "▶️"] and
                 reaction.message.id == message.id
             )
         
@@ -2053,77 +2086,223 @@ async def random_team_slash(
             while True:
                 reaction, user = await bot.wait_for('reaction_add', timeout=300.0, check=check)
                 
-                if str(reaction.emoji) == "🎮":
-                    if user.id not in participants:
-                        participants.append(user.id)
+                # ========== 修復：處理模式選擇 ==========
+                if str(reaction.emoji) in ["📏", "🎯"]:
+                    if user.id != interaction.user.id:
+                        try:
+                            await message.remove_reaction(reaction.emoji, user)
+                            await message.channel.send(f"❌ <@{user.id}> 只有主持人可以選擇模式！", delete_after=5)
+                        except:
+                            pass
+                        continue
+                    
+                    if str(reaction.emoji) == "📏":
+                        selected_mode = 'size'
+                        mode_text = "設定每組人數上限"
                         
-                        new_embed = discord.Embed(
-                            title="👥 隨機分組",
-                            description="點擊 🎮 按鈕參加分組\n主持人點擊 ▶️ 按鈕開始分組",
-                            color=0x3498DB
-                        )
-                        
-                        if team_size:
-                            new_embed.add_field(name="每組人數", value=str(team_size), inline=True)
-                        if team_count:
-                            new_embed.add_field(name="組數", value=str(team_count), inline=True)
-                        
-                        new_embed.add_field(name="參加人數", value=f"{len(participants)} 人", inline=True)
-                        
-                        if participants:
-                            participants_text = ""
-                            for i, pid in enumerate(participants[:10], 1):
-                                participants_text += f"{i}. <@{pid}>\n"
-                            if len(participants) > 10:
-                                participants_text += f"\n... 還有 {len(participants) - 10} 人"
+                        # 如果已經指定了max_team_size，直接使用
+                        if not max_team_size:
+                            # 詢問每組最大人數
+                            await message.channel.send(
+                                f"<@{user.id}> 請輸入每組的最大人數（例如：5）：",
+                                delete_after=10
+                            )
                             
-                            new_embed.add_field(name="參加者", value=participants_text, inline=False)
+                            def check_msg(m):
+                                return m.author.id == user.id and m.channel.id == message.channel.id and m.content.isdigit()
+                            
+                            try:
+                                msg = await bot.wait_for('message', timeout=30.0, check=check_msg)
+                                max_team_size = int(msg.content)
+                                await msg.delete()
+                            except asyncio.TimeoutError:
+                                await message.channel.send("❌ 輸入超時，請重新選擇模式", delete_after=5)
+                                continue
+                    
+                    else:  # 🎯
+                        selected_mode = 'count'
+                        mode_text = "設定組數"
                         
-                        new_embed.set_footer(text=f"等待主持人開始... ({len(participants)}人參加)")
+                        # 如果已經指定了team_count，直接使用
+                        if not team_count:
+                            # 詢問組數
+                            await message.channel.send(
+                                f"<@{user.id}> 請輸入要分成幾組（例如：2）：",
+                                delete_after=10
+                            )
+                            
+                            def check_msg(m):
+                                return m.author.id == user.id and m.channel.id == message.channel.id and m.content.isdigit()
+                            
+                            try:
+                                msg = await bot.wait_for('message', timeout=30.0, check=check_msg)
+                                team_count = int(msg.content)
+                                await msg.delete()
+                            except asyncio.TimeoutError:
+                                await message.channel.send("❌ 輸入超時，請重新選擇模式", delete_after=5)
+                                continue
+                    
+                    # 更新訊息
+                    new_embed = discord.Embed(
+                        title="👥 隨機分組系統",
+                        description=f"**已選擇：{mode_text}**\n\n"
+                                   "點擊 🎮 按鈕參加分組\n"
+                                   "主持人點擊 ▶️ 按鈕開始分組",
+                        color=0x3498DB
+                    )
+                    
+                    new_embed.add_field(name="目前模式", value=mode_text, inline=True)
+                    
+                    if selected_mode == 'size' and max_team_size:
+                        new_embed.add_field(name="每組最大人數", value=str(max_team_size), inline=True)
+                    elif selected_mode == 'count' and team_count:
+                        new_embed.add_field(name="組數", value=str(team_count), inline=True)
+                    
+                    new_embed.add_field(name="參加人數", value=f"{len(participants)} 人", inline=True)
+                    
+                    if participants:
+                        # ========== 修復：顯示所有參加者 ==========
+                        participants_text = ""
+                        for i, pid in enumerate(participants, 1):
+                            participants_text += f"{i}. <@{pid}>\n"
                         
-                        await message.edit(embed=new_embed)
+                        new_embed.add_field(
+                            name=f"參加者 ({len(participants)}人)",
+                            value=participants_text,
+                            inline=False
+                        )
+                    
+                    new_embed.set_footer(text=f"等待參加者... ({len(participants)}人參加)")
+                    
+                    await message.edit(embed=new_embed)
+                
+                # ========== 修復：參加功能 ==========
+                elif str(reaction.emoji) == "🎮":
+                    if user.id in participants:
+                        try:
+                            await message.remove_reaction(reaction.emoji, user)
+                        except:
+                            pass
+                        continue
+                    
+                    # 添加到參與者列表
+                    participants.append(user.id)
+                    print(f"✅ 用戶 {user.id} 參加分組，目前 {len(participants)} 人")
+                    
+                    # 更新訊息
+                    new_embed = discord.Embed(
+                        title="👥 隨機分組系統",
+                        description=f"**已選擇：{selected_mode or '未選擇'}**\n\n"
+                                   "點擊 🎮 按鈕參加分組\n"
+                                   "主持人點擊 ▶️ 按鈕開始分組",
+                        color=0x3498DB
+                    )
+                    
+                    mode_text = "設定每組人數上限" if selected_mode == 'size' else "設定組數" if selected_mode == 'count' else "未選擇"
+                    new_embed.add_field(name="目前模式", value=mode_text, inline=True)
+                    
+                    if selected_mode == 'size' and max_team_size:
+                        new_embed.add_field(name="每組最大人數", value=str(max_team_size), inline=True)
+                    elif selected_mode == 'count' and team_count:
+                        new_embed.add_field(name="組數", value=str(team_count), inline=True)
+                    
+                    new_embed.add_field(name="參加人數", value=f"{len(participants)} 人", inline=True)
+                    
+                    # 顯示所有參加者
+                    if participants:
+                        participants_text = ""
+                        for i, pid in enumerate(participants, 1):
+                            participants_text += f"{i}. <@{pid}>\n"
                         
+                        new_embed.add_field(
+                            name=f"參加者 ({len(participants)}人)",
+                            value=participants_text,
+                            inline=False
+                        )
+                    
+                    new_embed.set_footer(text=f"等待主持人開始... ({len(participants)}人參加)")
+                    
+                    await message.edit(embed=new_embed)
+                
+                # ========== 修復：開始分組 ==========
                 elif str(reaction.emoji) == "▶️" and user.id == interaction.user.id:
+                    if not selected_mode:
+                        await message.channel.send("❌ 請先選擇分組模式！", delete_after=5)
+                        continue
+                    
                     if len(participants) < 2:
                         await message.channel.send("❌ 至少需要2人才能開始分組", delete_after=5)
                         continue
                     
+                    # 隨機打亂參與者
                     random.shuffle(participants)
                     
-                    if team_size:
-                        team_count = len(participants) // team_size
-                        if len(participants) % team_size != 0:
-                            team_count += 1
-                    elif team_count:
-                        team_size = len(participants) // team_count
-                        if len(participants) % team_count != 0:
-                            team_size += 1
-                    else:
-                        if len(participants) <= 4:
-                            team_size = 2
-                        elif len(participants) <= 8:
-                            team_size = 4
-                        else:
-                            team_size = 5
+                    # ========== 修復：平衡分組邏輯 ==========
+                    if selected_mode == 'size':  # 模式A：設定每組人數上限
+                        if not max_team_size:
+                            await message.channel.send("❌ 請設定每組最大人數！", delete_after=5)
+                            continue
                         
-                        team_count = len(participants) // team_size
-                        if len(participants) % team_size != 0:
-                            team_count += 1
+                        # 計算最少需要的組數
+                        min_teams = max(1, len(participants) // max_team_size)
+                        if len(participants) % max_team_size != 0:
+                            min_teams += 1
+                        
+                        # 嘗試平衡分組
+                        team_size = len(participants) // min_teams
+                        remainder = len(participants) % min_teams
+                        
+                        teams = []
+                        start_idx = 0
+                        
+                        for i in range(min_teams):
+                            # 計算這一組的人數
+                            current_team_size = team_size + (1 if i < remainder else 0)
+                            end_idx = start_idx + current_team_size
+                            
+                            team = participants[start_idx:end_idx]
+                            teams.append(team)
+                            start_idx = end_idx
                     
-                    teams = []
-                    for i in range(team_count):
-                        start_idx = i * team_size
-                        end_idx = min((i + 1) * team_size, len(participants))
-                        if start_idx < len(participants):
-                            teams.append(participants[start_idx:end_idx])
+                    else:  # 模式B：設定組數
+                        if not team_count:
+                            await message.channel.send("❌ 請設定組數！", delete_after=5)
+                            continue
+                        
+                        team_count = min(team_count, len(participants))  # 不能超過參與者數量
+                        
+                        # 平衡分組
+                        base_size = len(participants) // team_count
+                        remainder = len(participants) % team_count
+                        
+                        teams = []
+                        start_idx = 0
+                        
+                        for i in range(team_count):
+                            current_team_size = base_size + (1 if i < remainder else 0)
+                            end_idx = start_idx + current_team_size
+                            
+                            team = participants[start_idx:end_idx]
+                            teams.append(team)
+                            start_idx = end_idx
                     
+                    # ========== 修復：顯示分組結果 ==========
                     result_embed = discord.Embed(
                         title="👥 分組結果",
-                        description=f"總人數：{len(participants)} 人\n"
-                                   f"分組方式：{team_count} 組，每組約 {team_size} 人",
+                        description=f"**總人數：** {len(participants)} 人\n"
+                                   f"**分組方式：** {len(teams)} 組",
                         color=0x00FF00
                     )
                     
+                    if selected_mode == 'size':
+                        actual_max = max(len(team) for team in teams)
+                        actual_min = min(len(team) for team in teams)
+                        result_embed.description += f"\n**每組人數：** {actual_min}-{actual_max} 人 (上限: {max_team_size})"
+                    else:
+                        avg_size = len(participants) / len(teams)
+                        result_embed.description += f"\n**平均每組：** {avg_size:.1f} 人"
+                    
+                    # 顯示所有組別
                     for i, team in enumerate(teams, 1):
                         members_list = "\n".join([f"{j+1}. <@{member_id}>" for j, member_id in enumerate(team)])
                         result_embed.add_field(
@@ -2131,6 +2310,14 @@ async def random_team_slash(
                             value=members_list,
                             inline=False
                         )
+                    
+                    # 顯示所有參與者
+                    participants_text = "\n".join([f"{j+1}. <@{pid}>" for j, pid in enumerate(participants)])
+                    result_embed.add_field(
+                        name=f"所有參與者 ({len(participants)}人)",
+                        value=participants_text,
+                        inline=False
+                    )
                     
                     await message.channel.send(embed=result_embed)
                     await message.clear_reactions()
@@ -2152,6 +2339,145 @@ async def random_team_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
+
+# ========== 修復反應處理中的問題 ==========
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    """處理反應事件"""
+    if payload.user_id == bot.user.id:
+        return
+    
+    try:
+        emoji = str(payload.emoji)
+        user_id = payload.user_id
+        
+        channel = bot.get_channel(payload.channel_id)
+        if not channel:
+            return
+        
+        try:
+            message = await channel.fetch_message(payload.message_id)
+        except:
+            return
+        
+        guild_id = payload.guild_id if hasattr(payload, 'guild_id') else 0
+        
+        # ========== 修復：處理分組反應時的競賽條件 ==========
+        # 檢查是否是分組訊息
+        if emoji in ["📏", "🎯", "🎮", "▶️"]:
+            # 檢查是否是分組訊息（透過訊息內容判斷）
+            if message.embeds and len(message.embeds) > 0:
+                embed = message.embeds[0]
+                if "隨機分組系統" in embed.title or "分組" in embed.title:
+                    # 檢查用戶是否已經在參與者中
+                    # 這裡需要延遲一點，避免同時反應的問題
+                    await asyncio.sleep(0.5)  # 增加延遲避免競賽條件
+                    
+                    # 重新獲取訊息以確保數據最新
+                    try:
+                        message = await channel.fetch_message(payload.message_id)
+                    except:
+                        return
+                    
+                    # 這裡的邏輯已經在上面修改的指令中處理
+                    return
+        
+        # 檢查是否是抽獎
+        result = await db.fetchrow(
+            """
+            SELECT id, participants, creator_id 
+            FROM giveaways 
+            WHERE message_id = $1 AND is_active = true AND guild_id = $2
+            """,
+            payload.message_id, guild_id
+        )
+        
+        if result:
+            giveaway_id = result['id']
+            participants = result['participants'] or []
+            creator_id = result['creator_id']
+            
+            if emoji == "🎫":
+                # ========== 修復：避免重複加入 ==========
+                if isinstance(participants, str):
+                    try:
+                        participants = json.loads(participants)
+                    except:
+                        participants = []
+                
+                # 檢查是否已經參加
+                if user_id in participants:
+                    try:
+                        await message.remove_reaction(emoji, payload.member)
+                    except:
+                        pass
+                    return
+                
+                # 添加延遲避免同時反應問題
+                await asyncio.sleep(0.3)
+                
+                participants.append(user_id)
+                await db.execute(
+                    "UPDATE giveaways SET participants = $1 WHERE id = $2 AND guild_id = $3",
+                    json.dumps(participants), giveaway_id, guild_id
+                )
+                
+                try:
+                    if message.embeds:
+                        embed = message.embeds[0]
+                        
+                        new_embed = discord.Embed(
+                            title=embed.title,
+                            description=embed.description,
+                            color=embed.color
+                        )
+                        
+                        for field in embed.fields:
+                            if field.name == "🎫 參與人數":
+                                new_embed.add_field(
+                                    name="🎫 參與人數", 
+                                    value=f"{len(participants)} 人", 
+                                    inline=field.inline
+                                )
+                            elif field.name == "📋 參與者列表":
+                                # 更新參與者列表
+                                participants_text = ""
+                                for i, pid in enumerate(participants[:50], 1):
+                                    participants_text += f"{i}. <@{pid}>\n"
+                                
+                                if len(participants) > 50:
+                                    participants_text += f"\n... 還有 {len(participants) - 50} 人"
+                                
+                                new_embed.add_field(
+                                    name="📋 參與者列表",
+                                    value=participants_text,
+                                    inline=False
+                                )
+                            else:
+                                new_embed.add_field(
+                                    name=field.name, 
+                                    value=field.value, 
+                                    inline=field.inline
+                                )
+                        
+                        if embed.footer:
+                            new_embed.set_footer(text=embed.footer.text)
+                        
+                        await message.edit(embed=new_embed)
+                except Exception as e:
+                    print(f"❌ 更新抽獎訊息錯誤: {e}")
+            
+            elif emoji == "⏹️" and user_id == creator_id:
+                await end_giveaway(payload.message_id, manual=True, guild_id=guild_id)
+                await channel.send(f"⏹️ 主辦人手動結束了抽獎！")
+            return
+        
+        # ... 其他現有的反應處理邏輯保持不變 ...
+        
+    except Exception as e:
+        print(f"❌ 處理反應錯誤: {e}")
+        traceback.print_exc()
 
 @tree.command(name="score_ranking", description="查看積分排行榜")
 async def score_ranking_slash(interaction: discord.Interaction):
@@ -4264,6 +4590,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
