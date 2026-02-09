@@ -3226,170 +3226,606 @@ async def attendance_ranking_slash(
         )
         await interaction.followup.send(embed=error_embed)
 
-@tree.command(name="blessing", description="測試今日運程")
+@tree.command(name="blessing", description="測試今日運程（阿爾比恩版）")
 async def blessing_slash(interaction: discord.Interaction):
-    """測試今日運程"""
+    """測試今日運程 - 阿爾比恩特別版"""
     await interaction.response.defer()
     
     try:
-        # 更多樣化的祝福語
-        blessings = [
-            {
-                "text": "今日是超級幸運日！做什麼都會成功，財運亨通！",
-                "weight": 15,
+        # ========== 運程等級定義 ==========
+        fortune_levels = {
+            "大吉": {
+                "weight": 20,      # 20% 機率
                 "color": 0xFFD700,  # 金色
-                "icon": "🌟",
-                "additional": "**💝 特別提示：** 今天是投資、簽約的好日子！"
+                "emoji": "🌟",
+                "title_suffix": " ✨ 鴻運當頭 ✨"
             },
-            {
-                "text": "平穩順遂的一天，適合規劃未來。",
-                "weight": 20,
+            "吉": {
+                "weight": 25,      # 25% 機率
                 "color": 0x00FF00,  # 綠色
-                "icon": "🍀",
-                "additional": "**🌱 成長建議：** 學習新技能會有意外收穫"
+                "emoji": "🍀",
+                "title_suffix": " 👍 順心如意"
             },
-            {
-                "text": "可能會遇到小小的驚喜，保持期待！",
-                "weight": 15,
-                "color": 0xFF69B4,  # 粉色
-                "icon": "🎁",
-                "additional": "**🎯 行動指南：** 多與朋友互動"
-            },
-            {
-                "text": "保持積極態度，好運自然來敲門",
-                "weight": 12,
-                "color": 0x4169E1,  # 皇家藍
-                "icon": "🔑",
-                "additional": "**✨ 幸運物：** 藍色物品"
-            },
-            {
-                "text": "今天適合嘗試新事物，突破自我",
-                "weight": 10,
-                "color": 0xFF4500,  # 橙色
-                "icon": "🔥",
-                "additional": "**⚡ 能量提醒：** 勇於改變現狀"
-            },
-            {
-                "text": "注意與人的溝通，避免誤會發生",
-                "weight": 8,
+            "中平": {
+                "weight": 30,      # 30% 機率
                 "color": 0xFFFF00,  # 黃色
-                "icon": "💬",
-                "additional": "**🤝 人際提示：** 說話前多思考"
+                "emoji": "⚖️",
+                "title_suffix": " 🤝 平穩過渡"
             },
-            {
-                "text": "財運不錯，但要理性消費",
-                "weight": 7,
-                "color": 0x00CED1,  # 青色
-                "icon": "💰",
-                "additional": "**💸 財運指數：** 4.5/5"
+            "凶": {
+                "weight": 15,      # 15% 機率
+                "color": 0xFF4500,  # 橙色
+                "emoji": "⚠️",
+                "title_suffix": " ⚠️ 謹慎行事"
             },
-            {
-                "text": "感情方面會有好的發展",
-                "weight": 6,
-                "color": 0xFF1493,  # 深粉色
-                "icon": "💖",
-                "additional": "**💞 愛情運：** 單身者有機會遇到心儀對象"
-            },
-            {
-                "text": "工作學習效率很高，好好把握",
-                "weight": 5,
-                "color": 0x228B22,  # 森林綠
-                "icon": "📚",
-                "additional": "**🎯 效率提示：** 早上9-11點效率最佳"
-            },
-            {
-                "text": "休息一下，給自己充充電",
-                "weight": 2,
-                "color": 0x9370DB,  # 中紫色
-                "icon": "😴",
-                "additional": "**🧘‍♀️ 健康提醒：** 注意睡眠品質"
+            "大凶": {
+                "weight": 10,      # 10% 機率
+                "color": 0xFF0000,  # 紅色
+                "emoji": "💀",
+                "title_suffix": " 🔥 挑戰考驗"
             }
+        }
+        
+        # ========== 大量祝福語庫 ==========
+        fortune_texts = {
+            "大吉": [
+                "今日運勢爆棚！做什麼都順風順水！",
+                "貴人相助，事半功倍的一天！",
+                "財神眷顧，財運亨通！",
+                "靈感湧現，創意無限！",
+                "人際關係和諧，合作順利！",
+                "健康狀況極佳，精力充沛！",
+                "學習效率超高，吸收力強！",
+                "愛情甜蜜，感情升溫！",
+                "機會來敲門，好好把握！",
+                "心想事成，美夢成真！",
+                "事業突破，晉升有望！",
+                "投資眼光精準，回報豐厚！",
+                "團隊合作無間，戰績輝煌！",
+                "幸運女神特別眷顧你！",
+                "一切障礙都將迎刃而解！",
+                "光芒四射，成為焦點人物！",
+                "收穫滿滿，成果豐碩！",
+                "正能量滿滿，影響他人！",
+                "突破極限，創造奇蹟！",
+                "天時地利人和，完美的一天！"
+            ],
+            "吉": [
+                "運勢不錯，小有收穫！",
+                "平穩順利，無風無浪！",
+                "小小驚喜在前方等著你！",
+                "人際關係融洽，心情愉快！",
+                "工作學習進展順利！",
+                "健康狀況良好，精神飽滿！",
+                "財運平穩，小有進帳！",
+                "感情穩定，溫馨甜蜜！",
+                "有新的機會出現，值得嘗試！",
+                "努力會有回報，繼續加油！",
+                "遇到困難也能順利解決！",
+                "團隊氣氛和諧，合作愉快！",
+                "靈感來臨，創作順利！",
+                "計劃順利推進，目標可期！",
+                "得到他人幫助，心存感激！",
+                "心情舒暢，正能量滿滿！",
+                "小確幸不斷，幸福感提升！",
+                "溝通順暢，誤會化解！",
+                "身體健康，活力充沛！",
+                "平靜安穩，享受當下！"
+            ],
+            "中平": [
+                "保持平常心，平安就是福！",
+                "平淡的一天，但無災無難！",
+                "中庸之道，不偏不倚！",
+                "按部就班，穩步前進！",
+                "保持現狀，蓄勢待發！",
+                "風平浪靜，適合反思規劃！",
+                "不特別好也不特別壞！",
+                "適合整理思緒，重新出發！",
+                "平平淡淡才是真！",
+                "維持現狀，等待時機！",
+                "沒有驚喜也沒有驚嚇！",
+                "適合休息充電的一天！",
+                "保持平衡，避免極端！",
+                "穩紮穩打，步步為營！",
+                "中規中矩，平安度過！",
+                "適合低調行事的一天！",
+                "保持冷靜，理性思考！",
+                "不求有功，但求無過！",
+                "平平穩穩，順其自然！",
+                "休息是為了走更長遠的路！"
+            ],
+            "凶": [
+                "小心駛得萬年船，謹慎行事！",
+                "可能遇到小麻煩，保持冷靜！",
+                "注意健康，適當休息！",
+                "財務上要小心謹慎！",
+                "人際關係可能有些緊張！",
+                "計劃可能遇到阻礙！",
+                "情緒波動較大，需要調整！",
+                "注意溝通，避免誤會！",
+                "做事要更細心一些！",
+                "可能會有小小的不順心！",
+                "壓力較大，需要紓解！",
+                "注意時間管理，避免拖延！",
+                "可能有些意外狀況！",
+                "需要更多耐心和毅力！",
+                "謹言慎行，避免衝突！",
+                "健康方面要多加注意！",
+                "財務上要保守一些！",
+                "情緒管理很重要！",
+                "做事要三思而後行！",
+                "保持低調，避免麻煩！"
+            ],
+            "大凶": {
+                "weight": 10,      # 10% 機率
+                "color": 0xFF0000,  # 紅色
+                "emoji": "💀",
+                "title_suffix": " 🔥 挑戰考驗"
+            }
+        }
+        
+        fortune_texts = {
+            "大吉": [
+                "今日運勢爆棚！做什麼都順風順水！",
+                "貴人相助，事半功倍的一天！",
+                "財神眷顧，財運亨通！",
+                "靈感湧現，創意無限！",
+                "人際關係和諧，合作順利！",
+                "健康狀況極佳，精力充沛！",
+                "學習效率超高，吸收力強！",
+                "愛情甜蜜，感情升溫！",
+                "機會來敲門，好好把握！",
+                "心想事成，美夢成真！",
+                "事業突破，晉升有望！",
+                "投資眼光精準，回報豐厚！",
+                "團隊合作無間，戰績輝煌！",
+                "幸運女神特別眷顧你！",
+                "一切障礙都將迎刃而解！",
+                "光芒四射，成為焦點人物！",
+                "收穫滿滿，成果豐碩！",
+                "正能量滿滿，影響他人！",
+                "突破極限，創造奇蹟！",
+                "天時地利人和，完美的一天！"
+            ],
+            "吉": [
+                "運勢不錯，小有收穫！",
+                "平穩順利，無風無浪！",
+                "小小驚喜在前方等著你！",
+                "人際關係融洽，心情愉快！",
+                "工作學習進展順利！",
+                "健康狀況良好，精神飽滿！",
+                "財運平穩，小有進帳！",
+                "感情穩定，溫馨甜蜜！",
+                "有新的機會出現，值得嘗試！",
+                "努力會有回報，繼續加油！",
+                "遇到困難也能順利解決！",
+                "團隊氣氛和諧，合作愉快！",
+                "靈感來臨，創作順利！",
+                "計劃順利推進，目標可期！",
+                "得到他人幫助，心存感激！",
+                "心情舒暢，正能量滿滿！",
+                "小確幸不斷，幸福感提升！",
+                "溝通順暢，誤會化解！",
+                "身體健康，活力充沛！",
+                "平靜安穩，享受當下！"
+            ],
+            "中平": [
+                "保持平常心，平安就是福！",
+                "平淡的一天，但無災無難！",
+                "中庸之道，不偏不倚！",
+                "按部就班，穩步前進！",
+                "保持現狀，蓄勢待發！",
+                "風平浪靜，適合反思規劃！",
+                "不特別好也不特別壞！",
+                "適合整理思緒，重新出發！",
+                "平平淡淡才是真！",
+                "維持現狀，等待時機！",
+                "沒有驚喜也沒有驚嚇！",
+                "適合休息充電的一天！",
+                "保持平衡，避免極端！",
+                "穩紮穩打，步步為營！",
+                "中規中矩，平安度過！",
+                "適合低調行事的一天！",
+                "保持冷靜，理性思考！",
+                "不求有功，但求無過！",
+                "平平穩穩，順其自然！",
+                "休息是為了走更長遠的路！"
+            ],
+            "凶": [
+                "小心駛得萬年船，謹慎行事！",
+                "可能遇到小麻煩，保持冷靜！",
+                "注意健康，適當休息！",
+                "財務上要小心謹慎！",
+                "人際關係可能有些緊張！",
+                "計劃可能遇到阻礙！",
+                "情緒波動較大，需要調整！",
+                "注意溝通，避免誤會！",
+                "做事要更細心一些！",
+                "可能會有小小的不順心！",
+                "壓力較大，需要紓解！",
+                "注意時間管理，避免拖延！",
+                "可能有些意外狀況！",
+                "需要更多耐心和毅力！",
+                "謹言慎行，避免衝突！",
+                "健康方面要多加注意！",
+                "財務上要保守一些！",
+                "情緒管理很重要！",
+                "做事要三思而後行！",
+                "保持低調，避免麻煩！"
+            ],
+            "大凶": [
+                "挑戰重重，需要加倍努力！",
+                "運勢不佳，凡事要小心！",
+                "可能遇到較大困難！",
+                "需要堅強的意志力！",
+                "人際關係可能出現問題！",
+                "健康要特別注意！",
+                "財務上要非常謹慎！",
+                "計劃可能全面受阻！",
+                "情緒低落，需要支持！",
+                "一切都不太順利！",
+                "壓力山大，需要紓壓！",
+                "可能會有意外的打擊！",
+                "需要重新調整策略！",
+                "合作關係可能出現裂痕！",
+                "健康亮紅燈，要休息！",
+                "財務危機可能出現！",
+                "心情沉重，需要調適！",
+                "做事阻礙重重！",
+                "需要尋求他人幫助！",
+                "考驗你的韌性和毅力！"
+            ]
+        }
+        
+        # ========== 阿爾比恩遊戲相關內容 ==========
+        albion_activities = [
+            "地城探索", "PvP戰鬥", "公會戰", "資源採集", "裝備製作",
+            "市場交易", "領地爭奪", "世界BOSS", "競技場", "運輸貿易",
+            "釣魚", "農業", "煉金術", "附魔", "寶石鑲嵌",
+            "坐騎培養", "房屋建設", "公會任務", "懸賞任務", "探險任務"
         ]
         
-        # 根據權重選擇
-        weights = [b["weight"] for b in blessings]
-        blessing = random.choices(blessings, weights=weights, k=1)[0]
-        
-        # 生成幸運度（1-10星）
-        luck_stars = random.randint(4, 10)
-        stars = blessing["icon"] * luck_stars
-        
-        # 生成額外建議
-        extra_advices = [
-            "**🎲 幸運數字：** " + ", ".join(str(random.randint(1, 50)) for _ in range(3)),
-            "**🌈 幸運顏色：** " + random.choice(["紅色", "藍色", "綠色", "金色", "紫色", "白色"]),
-            "**⏰ 吉時：** " + random.choice(["早上8-10點", "中午12-1點", "下午3-5點", "晚上7-9點"]),
-            "**📍 幸運方位：** " + random.choice(["東方", "西方", "南方", "北方", "東北方"]),
-            "**🎵 幸運音樂類型：** " + random.choice(["古典樂", "流行樂", "爵士樂", "輕音樂", "自然音"])
+        albion_zones = [
+            "皇家大陸", "黑區", "紅區", "藍區", "黃區",
+            "阿瓦隆路", "地獄門", "腐化地牢", "懸崖邊境", "迷霧",
+            "雪地", "沙漠", "森林", "沼澤", "山脈",
+            "海岸線", "地下城", "城堡遺跡", "神廟廢墟", "龍之巢穴"
         ]
         
-        # 隨機選擇3個額外建議
-        selected_extras = random.sample(extra_advices, 3)
+        albion_weapons = [
+            "單手劍", "雙手劍", "戰斧", "戰鎚", "長矛",
+            "匕首", "魔杖", "法杖", "弓", "十字弓",
+            "神聖杖", "自然法杖", "咒術法杖", "冰霜法杖", "火焰法杖",
+            "電擊法杖", "詛咒法杖", "治療法杖", "坦克盾", "輔助法器"
+        ]
         
+        albion_armor = [
+            "布甲", "皮甲", "板甲", "法袍", "戰袍",
+            "斗篷", "頭盔", "護肩", "護手", "護腿",
+            "靴子", "腰帶", "項鍊", "戒指", "耳環"
+        ]
+        
+        albion_mounts = [
+            "戰馬", "迅猛龍", "狼", "熊", "野豬",
+            "蠍子", "蜘蛛", "渡鴉", "獅鷲", "飛龍",
+            "獨角獸", "駱駝", "大象", "犀牛", "劍齒虎"
+        ]
+        
+        albion_resources = [
+            "原木", "石頭", "礦石", "纖維", "皮革",
+            "布料", "藥草", "魚類", "穀物", "水果",
+            "肉類", "寶石", "水晶", "符文", "魂石"
+        ]
+        
+        # ========== 職業相關建議 ==========
+        profession_advice = {
+            "坦克": [
+                "今天你的嘲諷特別有效，敵人會優先攻擊你！",
+                "防禦時機特別準確，會成為團隊的中流砥柱！",
+                "站位選擇極佳，能完美保護隊友！",
+                "格擋成功率大幅提升！",
+                "吸收傷害的能力特別強！",
+                "控場技能效果加倍！",
+                "仇恨值管理得心應手！",
+                "保護隊友的意識特別敏銳！",
+                "生存能力大幅提升！",
+                "成為團隊的堅實盾牌！"
+            ],
+            "输出": [
+                "暴擊率大幅提升，傷害爆表！",
+                "技能連招特別流暢！",
+                "走位靈活，難以被擊中！",
+                "攻擊速度明顯加快！",
+                "技能冷卻時間縮短！",
+                "命中率極高，招招致命！",
+                "能量管理得心應手！",
+                "爆發時機掌握完美！",
+                "輸出循環特別順暢！",
+                "成為團隊的主要傷害來源！"
+            ],
+            "治疗": [
+                "治療效果大幅提升！",
+                "治療範圍明顯擴大！",
+                "法力消耗減少！",
+                "治療時機掌握完美！",
+                "群體治療效果極佳！",
+                "復活成功率大幅提升！",
+                "淨化技能效果加倍！",
+                "治療之泉效果持久！",
+                "護盾強度大幅提升！",
+                "成為團隊的生命線！"
+            ],
+            "辅助": [
+                "增益效果持續時間延長！",
+                "減益效果威力加強！",
+                "團隊buff覆蓋率提高！",
+                "控場技能效果顯著！",
+                "移動速度加成明顯！",
+                "資源恢復速度加快！",
+                "技能冷卻減免效果加倍！",
+                "團隊協同能力提升！",
+                "戰術指揮特別有效！",
+                "成為團隊的靈魂人物！"
+            ]
+        }
+        
+        # ========== 選擇運程等級 ==========
+        levels = list(fortune_levels.keys())
+        weights = [fortune_levels[level]["weight"] for level in levels]
+        selected_level = random.choices(levels, weights=weights, k=1)[0]
+        level_info = fortune_levels[selected_level]
+        
+        # ========== 選擇祝福語 ==========
+        selected_text = random.choice(fortune_texts[selected_level])
+        
+        # ========== 生成詳細內容 ==========
+        # 幸運度（1-100）
+        if selected_level == "大吉":
+            luck_score = random.randint(85, 100)
+        elif selected_level == "吉":
+            luck_score = random.randint(70, 84)
+        elif selected_level == "中平":
+            luck_score = random.randint(50, 69)
+        elif selected_level == "凶":
+            luck_score = random.randint(30, 49)
+        else:  # 大凶
+            luck_score = random.randint(1, 29)
+        
+        # 時段運勢
+        time_fortunes = ["大吉", "吉", "中平", "凶", "大凶"]
+        time_weights = {
+            "大吉": [40, 30, 20, 7, 3],
+            "吉": [20, 40, 25, 10, 5],
+            "中平": [10, 20, 40, 20, 10],
+            "凶": [5, 15, 25, 40, 15],
+            "大凶": [3, 7, 15, 25, 50]
+        }
+        
+        morning = random.choices(time_fortunes, weights=time_weights[selected_level], k=1)[0]
+        afternoon = random.choices(time_fortunes, weights=time_weights[selected_level], k=1)[0]
+        evening = random.choices(time_fortunes, weights=time_weights[selected_level], k=1)[0]
+        
+        # 幸運顏色
+        lucky_colors = ["紅色", "藍色", "綠色", "金色", "紫色", "白色", "黑色", "黃色", "橙色", "粉色"]
+        lucky_color = random.choice(lucky_colors)
+        
+        # 幸運物品
+        lucky_items = random.sample(albion_resources + albion_armor + albion_weapons, 3)
+        
+        # 阿爾比恩活動建議
+        recommended_activity = random.choice(albion_activities)
+        recommended_zone = random.choice(albion_zones)
+        recommended_weapon = random.choice(albion_weapons)
+        recommended_mount = random.choice(albion_mounts)
+        
+        # 生成幸運數字
+        lucky_numbers = sorted(random.sample(range(1, 101), 3))
+        
+        # 幸運方向
+        directions = ["東", "南", "西", "北", "東北", "東南", "西北", "西南"]
+        lucky_direction = random.choice(directions)
+        
+        # 隨機選擇一個職業建議
+        random_profession = random.choice(list(profession_advice.keys()))
+        profession_tip = random.choice(profession_advice[random_profession])
+        
+        # 愛情運勢
+        love_fortunes = [
+            "單身者可能遇到心儀對象！",
+            "感情穩定發展，甜蜜升級！",
+            "多溝通少猜疑，感情更融洽！",
+            "適合浪漫約會，增進感情！",
+            "愛情運平穩，保持現狀！",
+            "需要多花時間陪伴另一半！",
+            "可能有些小誤會，及時溝通！",
+            "感情需要更多耐心！",
+            "單身者桃花運不錯！",
+            "感情面臨考驗，需要堅持！"
+        ]
+        love_fortune = random.choice(love_fortunes)
+        
+        # 財運指南
+        money_fortunes = [
+            "財運亨通，投資有好回報！",
+            "收支平衡，穩健為上！",
+            "可能有意外之財！",
+            "財務狀況良好！",
+            "保守理財，避免風險！",
+            "有小額進帳！",
+            "注意開支控制！",
+            "投資需謹慎！",
+            "財運平穩！",
+            "可能有些財務壓力！"
+        ]
+        money_fortune = random.choice(money_fortunes)
+        
+        # 健康建議
+        health_tips = [
+            "精力充沛，適合運動！",
+            "注意休息，避免過勞！",
+            "健康狀況良好！",
+            "需要多補充水分！",
+            "適合進行健康檢查！",
+            "注意飲食均衡！",
+            "適度運動有益健康！",
+            "保持良好作息！",
+            "注意身體小狀況！",
+            "精神飽滿，狀態極佳！"
+        ]
+        health_tip = random.choice(health_tips)
+        
+        # 生活建議
+        life_advices = [
+            "保持心情平靜最重要！",
+            "多與家人朋友交流！",
+            "避免衝動消費或決定！",
+            "適合學習新知識！",
+            "給自己一些獨處時間！",
+            "嘗試新事物！",
+            "整理環境，煥然一新！",
+            "幫助他人會有好運！",
+            "保持樂觀心態！",
+            "珍惜當下時光！"
+        ]
+        # 隨機選擇3個生活建議
+        selected_advices = random.sample(life_advices, 3)
+        
+        # 趣味統計
+        positive_energy = random.randint(50, 100)
+        surprise_chance = random.randint(20, 80)
+        
+        # 生成統計圖標
+        luck_bar = create_progress_bar(luck_score, 20)
+        energy_bar = create_progress_bar(positive_energy, 20)
+        
+        # ========== 創建Embed ==========
         embed = discord.Embed(
-            title=f"{blessing['icon']} {interaction.user.display_name} 的今日運程",
-            description=f"**{blessing['text']}**\n\n{stars}\n\n**幸運度：** {luck_stars}/10",
-            color=blessing["color"]
+            title=f"{level_info['emoji']} {interaction.user.display_name} 的今日運程 {level_info['title_suffix']}",
+            description=f"**{selected_text}**\n\n{level_info['emoji'] * (luck_score // 20)}",
+            color=level_info['color']
         )
         
-        # 添加詳細信息
+        # 運程分析
         embed.add_field(
-            name="📊 詳細分析",
+            name="📊 運程分析",
             value=(
-                f"**運勢類型：** {blessing['icon']} {blessing['text'].split('！')[0] if '！' in blessing['text'] else blessing['text'].split('，')[0]}\n"
-                f"**影響領域：** {random.choice(['事業', '財富', '感情', '健康', '人際', '學習'])}\n"
-                f"**能量指數：** {random.randint(70, 100)}/100\n"
-                f"**建議行動：** {random.choice(['主動出擊', '保守觀望', '尋求合作', '自我提升', '休息調整'])}"
+                f"**運程等級：** {selected_level}\n"
+                f"**出現機率：** {level_info['weight']}%\n"
+                f"**幸運顏色：** {lucky_color}\n"
+                f"**幸運物品：** {', '.join(lucky_items)}"
+            ),
+            inline=True
+        )
+        
+        # 時段運勢
+        embed.add_field(
+            name="🕰️ 時段運勢",
+            value=(
+                f"**上午：** {morning}\n"
+                f"**下午：** {afternoon}\n"
+                f"**晚上：** {evening}"
+            ),
+            inline=True
+        )
+        
+        # 幸運指引
+        embed.add_field(
+            name="🎲 幸運指引",
+            value=(
+                f"**幸運數字：** {', '.join(map(str, lucky_numbers))}\n"
+                f"**幸運方向：** {lucky_direction}"
             ),
             inline=False
         )
         
-        # 添加額外建議
+        # 阿爾比恩專屬建議
         embed.add_field(
-            name="💡 今日小貼士",
-            value="\n".join(selected_extras),
+            name="🎮 阿爾比恩冒險指南",
+            value=(
+                f"**推薦活動：** {recommended_activity}\n"
+                f"**最佳區域：** {recommended_zone}\n"
+                f"**趁手武器：** {recommended_weapon}\n"
+                f"**推薦坐騎：** {recommended_mount}"
+            ),
             inline=False
         )
         
-        # 添加特別提示
-        if blessing["additional"]:
-            embed.add_field(
-                name="✨ 特別訊息",
-                value=blessing["additional"],
-                inline=False
-            )
+        # 職業建議（隨機一個職業）
+        embed.add_field(
+            name=f"⚔️ {random_profession}專屬建議",
+            value=profession_tip,
+            inline=False
+        )
         
-        # 添加每日名言
+        # 今日生活建議
+        embed.add_field(
+            name="💡 今日生活建議",
+            value="\n".join([f"• {advice}" for advice in selected_advices]),
+            inline=False
+        )
+        
+        # 愛情運勢
+        embed.add_field(
+            name="💖 愛情運勢",
+            value=love_fortune,
+            inline=True
+        )
+        
+        # 財運指南
+        embed.add_field(
+            name="💰 財運指南",
+            value=money_fortune,
+            inline=True
+        )
+        
+        # 健康建議
+        embed.add_field(
+            name="🏥 健康建議",
+            value=health_tip,
+            inline=True
+        )
+        
+        # 今日趣味統計
+        embed.add_field(
+            name="📈 今日趣味統計",
+            value=(
+                f"**今日幸運指數：** {luck_bar} {luck_score}%\n"
+                f"**正能量指數：** {energy_bar} {positive_energy}%\n"
+                f"**驚喜機率：** {surprise_chance}%"
+            ),
+            inline=False
+        )
+        
+        # 名言警句
         daily_quotes = [
-            "真正的幸運，是準備與機會的相遇。",
-            "今天是你餘生中最年輕的一天，好好把握。",
-            "微笑是最好的幸運符。",
-            "幸運女神眷顧勇敢的人。",
-            "每一天都是新的開始，新的機會。"
+            "堅持就是最好的運氣。",
+            "幸運女神眷顧有準備的人。",
+            "每一天都是新的開始。",
+            "保持微笑，好運自然來。",
+            "勇敢面對挑戰，運氣就在轉角。",
+            "心態決定運氣的高度。",
+            "堅持不懈，終有回報。",
+            "好運總是偏愛努力的人。",
+            "保持善良，運氣會更好。",
+            "今天是你改變命運的機會。"
         ]
         
         embed.add_field(
-            name="💝 每日名言",
+            name="💝 今日名言",
             value=f"「{random.choice(daily_quotes)}」",
             inline=False
         )
         
-        # 添加進度條
-        progress_bar = create_progress_bar(luck_stars * 10, 20)
-        embed.add_field(
-            name="📈 今日運勢",
-            value=f"{progress_bar} {luck_stars*10}%",
-            inline=False
+        embed.set_footer(
+            text=f"阿爾比恩運程系統 • {datetime.now().strftime('%Y年%m月%d日 %H:%M')} • 僅供娛樂參考"
         )
-        
-        embed.set_footer(text=f"測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 運程僅供娛樂")
         
         if interaction.user.avatar:
             embed.set_thumbnail(url=interaction.user.avatar.url)
         
         await interaction.followup.send(embed=embed)
         
-        await log_query("blessing", interaction.user.id, {"blessing": blessing["text"]}, get_guild_id(interaction))
+        await log_query("blessing", interaction.user.id, {"fortune_level": selected_level}, get_guild_id(interaction))
         
     except Exception as e:
         error_embed = discord.Embed(
@@ -6826,6 +7262,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 機器人啟動失敗: {e}")
         traceback.print_exc()
+
 
 
 
