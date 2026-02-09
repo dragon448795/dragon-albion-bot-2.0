@@ -2501,18 +2501,18 @@ async def giveaway_slash(
         
         end_time = datetime.now() + timedelta(seconds=seconds)
         
+        # 簡單的時間顯示
         if seconds < 60:
             time_display = f"{seconds}秒"
         elif seconds < 3600:
-            time_display = f"{seconds//60}分{seconds%60}秒"
+            minutes = seconds // 60
+            time_display = f"{minutes}分鐘"
         elif seconds < 86400:
             hours = seconds // 3600
-            minutes = (seconds % 3600) // 60
-            time_display = f"{hours}小時{minutes}分"
+            time_display = f"{hours}小時"
         else:
             days = seconds // 86400
-            hours = (seconds % 86400) // 3600
-            time_display = f"{days}天{hours}小時"
+            time_display = f"{days}天"
         
         embed = discord.Embed(
             title="🎉 自動抽獎活動 🎉",
@@ -2522,110 +2522,127 @@ async def giveaway_slash(
         
         embed.add_field(name="🎁 獎品", value=prize, inline=True)
         embed.add_field(name="👑 中獎人數", value=str(winners), inline=True)
-        embed.add_field(name="⏰ 結束時間", value=time_display, inline=True)
+        embed.add_field(name="⏰ 結束時間", value=f"{time_display}內", inline=True)
         embed.add_field(name="🎫 參與人數", value="0 人", inline=True)
         embed.add_field(name="📝 參與方式", value="點擊下方 🎫 按鈕參與", inline=True)
         embed.add_field(name="🔧 主辦人操作", value="點擊 ⏹️ 手動結束抽獎", inline=True)
         
         creator_name = interaction.user.display_name
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
         giveaway_id = f"giveaway_{int(time.time())}_{random.randint(1000, 9999)}"
         
-        embed.set_footer(text=f"抽獎ID: {giveaway_id} | 主辦人: {creator_name}•{current_time}")
+        embed.set_footer(text=f"抽獎ID: {giveaway_id} | 主辦人: {creator_name} • {datetime.now().strftime('%Y-%m-%d %H:%M')}")
         
         await interaction.followup.send(embed=embed)
         message = await interaction.original_response()
         
+        # 添加反應
         await message.add_reaction("🎫")
         await message.add_reaction("⏹️")
         
+        # 使用記憶體緩存參與者列表，減少資料庫讀取
+        participants_cache = []
+        
+        # 創建抽獎記錄
         await db.execute(
             '''
-            INSERT INTO giveaways (creator_id, prize, winner_count, end_time, message_id, channel_id, guild_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO giveaways (creator_id, prize, winner_count, end_time, message_id, channel_id, guild_id, participants)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ''',
-            interaction.user.id, prize, winners, end_time, message.id, interaction.channel.id, guild_id
+            interaction.user.id, prize, winners, end_time, message.id, interaction.channel.id, guild_id, json.dumps([])
         )
         
         print(f"✅ 抽獎已創建: 獎品={prize}, 時間={seconds}秒, 訊息ID={message.id}")
         
         async def countdown_timer():
+            nonlocal participants_cache
             remaining = seconds
-            last_update = time.time()
+            
+            # 更高效的更新邏輯：只在不頻繁的時間點更新顯示
+            last_update_time = time.time()
+            update_interval = 5  # 每5秒檢查一次是否有新參與者
             
             while remaining > 0:
-                await asyncio.sleep(1)
-                remaining -= 1
+                start_time = time.time()
                 
-                if time.time() - last_update >= 30:
-                    if remaining < 60:
-                        time_display = f"{remaining}秒"
-                    elif remaining < 3600:
-                        time_display = f"{remaining//60}分{remaining%60}秒"
-                    elif remaining < 86400:
-                        hours = remaining // 3600
-                        minutes = (remaining % 3600) // 60
-                        time_display = f"{hours}小時{minutes}分"
-                    else:
-                        days = remaining // 86400
-                        hours = (remaining % 86400) // 3600
-                        time_display = f"{days}天{hours}小時"
+                # 只在需要時更新顯示
+                if time.time() - last_update_time >= update_interval or remaining <= 30:
+                    # 從資料庫獲取最新參與者
+                    result = await db.fetchrow(
+                        "SELECT participants FROM giveaways WHERE message_id = $1 AND guild_id = $2",
+                        message.id, guild_id
+                    )
                     
-                    try:
-                        result = await db.fetchrow(
-                            "SELECT participants FROM giveaways WHERE message_id = $1 AND guild_id = $2",
-                            message.id, guild_id
-                        )
-                        participants_count = 0
-                        participants = []
-                        if result and result['participants']:
-                            participants = result['participants']
-                            if isinstance(participants, str):
-                                try:
-                                    participants = json.loads(participants)
-                                except:
-                                    participants = []
+                    if result and result['participants']:
+                        participants = result['participants']
+                        if isinstance(participants, str):
+                            try:
+                                participants = json.loads(participants)
+                            except:
+                                participants = []
+                        
+                        # 只有當參與者數量變化時才更新訊息
+                        if participants != participants_cache:
+                            participants_cache = participants.copy()
                             participants_count = len(participants)
-                        
-                        # ========== 修復：顯示所有參與者 ==========
-                        new_embed = discord.Embed(
-                            title="🎉 自動抽獎活動 🎉",
-                            description="時間到自動開獎！",
-                            color=0xFFD700
-                        )
-                        
-                        new_embed.add_field(name="🎁 獎品", value=prize, inline=True)
-                        new_embed.add_field(name="👑 中獎人數", value=str(winners), inline=True)
-                        new_embed.add_field(name="⏰ 結束時間", value=f"{time_display}內", inline=True)
-                        new_embed.add_field(name="🎫 參與人數", value=f"{participants_count} 人", inline=True)
-                        new_embed.add_field(name="📝 參與方式", value="點擊下方 🎫 按鈕參與", inline=True)
-                        new_embed.add_field(name="🔧 主辦人操作", value="點擊 ⏹️ 手動結束抽獎", inline=True)
-                        
-                        # 顯示參與者列表（分頁顯示，最多顯示50人）
-                        if participants_count > 0:
-                            participants_text = ""
-                            for i, user_id in enumerate(participants[:50], 1):
-                                participants_text += f"{i}. <@{user_id}>\n"
                             
-                            if participants_count > 50:
-                                participants_text += f"\n... 還有 {participants_count - 50} 人"
+                            # 更新時間顯示
+                            if remaining < 60:
+                                time_display = f"{remaining}秒"
+                            elif remaining < 3600:
+                                minutes = remaining // 60
+                                time_display = f"{minutes}分鐘"
+                            else:
+                                hours = remaining // 3600
+                                time_display = f"{hours}小時"
                             
-                            new_embed.add_field(
-                                name="📋 參與者列表",
-                                value=participants_text,
-                                inline=False
+                            new_embed = discord.Embed(
+                                title="🎉 自動抽獎活動 🎉",
+                                description="時間到自動開獎！",
+                                color=0xFFD700
                             )
-                        
-                        new_embed.set_footer(text=f"抽獎ID: {giveaway_id} | 主辦人: {creator_name}•{datetime.now().strftime('%Y-%m-%d %H:%M')}")
-                        
-                        await message.edit(embed=new_embed)
-                        last_update = time.time()
-                        
-                    except Exception as e:
-                        print(f"❌ 更新抽獎訊息錯誤: {e}")
+                            
+                            new_embed.add_field(name="🎁 獎品", value=prize, inline=True)
+                            new_embed.add_field(name="👑 中獎人數", value=str(winners), inline=True)
+                            new_embed.add_field(name="⏰ 結束時間", value=f"{time_display}內", inline=True)
+                            new_embed.add_field(name="🎫 參與人數", value=f"{participants_count} 人", inline=True)
+                            new_embed.add_field(name="📝 參與方式", value="點擊下方 🎫 按鈕參與", inline=True)
+                            new_embed.add_field(name="🔧 主辦人操作", value="點擊 ⏹️ 手動結束抽獎", inline=True)
+                            
+                            # 顯示最近5個參與者
+                            if participants_count > 0:
+                                recent_participants = []
+                                for uid in participants[-5:]:  # 只取最後5個
+                                    recent_participants.append(f"<@{uid}>")
+                                
+                                participants_text = ", ".join(recent_participants)
+                                if participants_count > 5:
+                                    participants_text += f" 等 {participants_count} 人"
+                                
+                                new_embed.add_field(
+                                    name="👥 參與者",
+                                    value=participants_text,
+                                    inline=False
+                                )
+                            
+                            new_embed.set_footer(text=f"抽獎ID: {giveaway_id} | 主辦人: {creator_name} • {datetime.now().strftime('%H:%M')}")
+                            
+                            try:
+                                await message.edit(embed=new_embed)
+                            except Exception as e:
+                                print(f"更新抽獎訊息失敗: {e}")
+                            
+                            last_update_time = time.time()
+                
+                # 計算剩餘時間（考慮處理時間）
+                elapsed = time.time() - start_time
+                sleep_time = max(0.1, 1 - elapsed)  # 確保至少休眠0.1秒
+                await asyncio.sleep(sleep_time)
+                remaining -= 1
             
+            # 抽獎結束
             await end_giveaway(message.id, guild_id=guild_id)
         
+        # 啟動計時器
         asyncio.create_task(countdown_timer())
         
     except Exception as e:
@@ -2635,7 +2652,6 @@ async def giveaway_slash(
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
-
 
 @tree.command(name="score_draw", description="使用積分抽獎")
 async def score_draw_slash(interaction: discord.Interaction):
@@ -3216,63 +3232,172 @@ async def blessing_slash(interaction: discord.Interaction):
     await interaction.response.defer()
     
     try:
+        # 更多樣化的祝福語
         blessings = [
-            "今日是幸運日！做什麼都會成功！",
-            "平平淡淡的一天，但注意健康",
-            "可能會遇到小小的驚喜",
-            "保持積極態度，好運自然來",
-            "今天適合嘗試新事物",
-            "注意與人的溝通，避免誤會",
-            "財運不錯，但要理性消費",
-            "感情方面會有好的發展",
-            "工作學習效率很高，好好把握",
-            "休息一下，給自己充充電"
+            {
+                "text": "今日是超級幸運日！做什麼都會成功，財運亨通！",
+                "weight": 15,
+                "color": 0xFFD700,  # 金色
+                "icon": "🌟",
+                "additional": "**💝 特別提示：** 今天是投資、簽約的好日子！"
+            },
+            {
+                "text": "平穩順遂的一天，適合規劃未來。",
+                "weight": 20,
+                "color": 0x00FF00,  # 綠色
+                "icon": "🍀",
+                "additional": "**🌱 成長建議：** 學習新技能會有意外收穫"
+            },
+            {
+                "text": "可能會遇到小小的驚喜，保持期待！",
+                "weight": 15,
+                "color": 0xFF69B4,  # 粉色
+                "icon": "🎁",
+                "additional": "**🎯 行動指南：** 多與朋友互動"
+            },
+            {
+                "text": "保持積極態度，好運自然來敲門",
+                "weight": 12,
+                "color": 0x4169E1,  # 皇家藍
+                "icon": "🔑",
+                "additional": "**✨ 幸運物：** 藍色物品"
+            },
+            {
+                "text": "今天適合嘗試新事物，突破自我",
+                "weight": 10,
+                "color": 0xFF4500,  # 橙色
+                "icon": "🔥",
+                "additional": "**⚡ 能量提醒：** 勇於改變現狀"
+            },
+            {
+                "text": "注意與人的溝通，避免誤會發生",
+                "weight": 8,
+                "color": 0xFFFF00,  # 黃色
+                "icon": "💬",
+                "additional": "**🤝 人際提示：** 說話前多思考"
+            },
+            {
+                "text": "財運不錯，但要理性消費",
+                "weight": 7,
+                "color": 0x00CED1,  # 青色
+                "icon": "💰",
+                "additional": "**💸 財運指數：** 4.5/5"
+            },
+            {
+                "text": "感情方面會有好的發展",
+                "weight": 6,
+                "color": 0xFF1493,  # 深粉色
+                "icon": "💖",
+                "additional": "**💞 愛情運：** 單身者有機會遇到心儀對象"
+            },
+            {
+                "text": "工作學習效率很高，好好把握",
+                "weight": 5,
+                "color": 0x228B22,  # 森林綠
+                "icon": "📚",
+                "additional": "**🎯 效率提示：** 早上9-11點效率最佳"
+            },
+            {
+                "text": "休息一下，給自己充充電",
+                "weight": 2,
+                "color": 0x9370DB,  # 中紫色
+                "icon": "😴",
+                "additional": "**🧘‍♀️ 健康提醒：** 注意睡眠品質"
+            }
         ]
         
-        weights = [20, 15, 12, 10, 8, 8, 8, 7, 6, 6]
+        # 根據權重選擇
+        weights = [b["weight"] for b in blessings]
         blessing = random.choices(blessings, weights=weights, k=1)[0]
         
-        colors = [
-            0xFFD700,  # 金色
-            0xC0C0C0,  # 銀色
-            0xCD7F32,  # 銅色
-            0x00FF00,  # 綠色
-            0x0000FF,  # 藍色
-            0x800080,  # 紫色
-            0xFF69B4,  # 粉紅色
-            0xFF4500,  # 橙色
-            0x4B0082,  # 靛色
-            0x8B4513   # 棕色
+        # 生成幸運度（1-10星）
+        luck_stars = random.randint(4, 10)
+        stars = blessing["icon"] * luck_stars
+        
+        # 生成額外建議
+        extra_advices = [
+            "**🎲 幸運數字：** " + ", ".join(str(random.randint(1, 50)) for _ in range(3)),
+            "**🌈 幸運顏色：** " + random.choice(["紅色", "藍色", "綠色", "金色", "紫色", "白色"]),
+            "**⏰ 吉時：** " + random.choice(["早上8-10點", "中午12-1點", "下午3-5點", "晚上7-9點"]),
+            "**📍 幸運方位：** " + random.choice(["東方", "西方", "南方", "北方", "東北方"]),
+            "**🎵 幸運音樂類型：** " + random.choice(["古典樂", "流行樂", "爵士樂", "輕音樂", "自然音"])
         ]
         
-        blessing_index = blessings.index(blessing)
-        color = colors[blessing_index]
-        
-        star_rating = "⭐" * (10 - blessing_index)
+        # 隨機選擇3個額外建議
+        selected_extras = random.sample(extra_advices, 3)
         
         embed = discord.Embed(
-            title=f"🔮 {interaction.user.display_name} 的今日運程",
-            description=f"**{blessing}**\n\n{star_rating}",
-            color=color
+            title=f"{blessing['icon']} {interaction.user.display_name} 的今日運程",
+            description=f"**{blessing['text']}**\n\n{stars}\n\n**幸運度：** {luck_stars}/10",
+            color=blessing["color"]
         )
         
+        # 添加詳細信息
         embed.add_field(
-            name="💝 溫馨提示",
-            value="運程僅供娛樂，真正的幸福要靠自己創造！",
+            name="📊 詳細分析",
+            value=(
+                f"**運勢類型：** {blessing['icon']} {blessing['text'].split('！')[0] if '！' in blessing['text'] else blessing['text'].split('，')[0]}\n"
+                f"**影響領域：** {random.choice(['事業', '財富', '感情', '健康', '人際', '學習'])}\n"
+                f"**能量指數：** {random.randint(70, 100)}/100\n"
+                f"**建議行動：** {random.choice(['主動出擊', '保守觀望', '尋求合作', '自我提升', '休息調整'])}"
+            ),
             inline=False
         )
         
-        embed.set_footer(text=f"測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # 添加額外建議
+        embed.add_field(
+            name="💡 今日小貼士",
+            value="\n".join(selected_extras),
+            inline=False
+        )
+        
+        # 添加特別提示
+        if blessing["additional"]:
+            embed.add_field(
+                name="✨ 特別訊息",
+                value=blessing["additional"],
+                inline=False
+            )
+        
+        # 添加每日名言
+        daily_quotes = [
+            "真正的幸運，是準備與機會的相遇。",
+            "今天是你餘生中最年輕的一天，好好把握。",
+            "微笑是最好的幸運符。",
+            "幸運女神眷顧勇敢的人。",
+            "每一天都是新的開始，新的機會。"
+        ]
+        
+        embed.add_field(
+            name="💝 每日名言",
+            value=f"「{random.choice(daily_quotes)}」",
+            inline=False
+        )
+        
+        # 添加進度條
+        progress_bar = create_progress_bar(luck_stars * 10, 20)
+        embed.add_field(
+            name="📈 今日運勢",
+            value=f"{progress_bar} {luck_stars*10}%",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"測試時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 運程僅供娛樂")
         
         if interaction.user.avatar:
             embed.set_thumbnail(url=interaction.user.avatar.url)
         
         await interaction.followup.send(embed=embed)
         
-        await log_query("blessing", interaction.user.id, {"blessing": blessing}, get_guild_id(interaction))
+        await log_query("blessing", interaction.user.id, {"blessing": blessing["text"]}, get_guild_id(interaction))
         
     except Exception as e:
-        await interaction.followup.send(f"❌ 運程測試失敗：{str(e)}")
+        error_embed = discord.Embed(
+            title="❌ 運程測試失敗",
+            description=f"錯誤：{str(e)[:100]}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed)
 
 # ========== 管理員指令 (4個) ==========
 
@@ -6701,5 +6826,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 機器人啟動失敗: {e}")
         traceback.print_exc()
+
 
 
