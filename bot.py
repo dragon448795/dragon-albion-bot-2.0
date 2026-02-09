@@ -54,7 +54,7 @@ SCORE_DRAW_EMOJIS = ["🟢", "🔵", "🟣"]
 
 # ========== 積分設定 ==========
 SIGNUP_SCORE = 40  # 簽到積分
-CHAT_SCORE = 5     # 每句話積分
+CHAT_SCORE = 1     # 每句話積分
 DAILY_CHAT_LIMIT = 20  # 每日聊天積分上限
 PROFESSION_BONUS = {
     "坦克": 0,
@@ -1311,19 +1311,19 @@ async def help_slash(interaction: discord.Interaction):
     )
     
     embed.add_field(
-        name="💰 積分系統",
-        value=(
-            "**聊天獎勵：** 每句話 +5 分，每日上限 20 分\n"
-            "**簽到獎勵：** 40 積分\n"
-            "**職業加成：** 補師 +20 積分\n"
-            "**評核獎勵：**\n"
-            "  • 優秀：+40 積分\n"
-            "  • 良好：+10 積分\n"
-            "  • 普通：+0 積分（預設）\n"
-            "  • 不合格：-5 積分"
-        ),
-        inline=False
-    )
+    name="💰 積分系統",
+    value=(
+        f"**聊天獎勵：** 每句話 +{CHAT_SCORE} 分，每日上限 {DAILY_CHAT_LIMIT} 分\n"
+        "**簽到獎勵：** 40 積分\n"
+        "**職業加成：** 補師 +20 積分\n"
+        "**評核獎勵：**\n"
+        "  • 優秀：+40 積分\n"
+        "  • 良好：+10 積分\n"
+        "  • 普通：+0 積分（預設）\n"
+        "  • 不合格：-5 積分"
+    ),
+    inline=False
+)
     
     db_status = "✅ 正常" if db.is_connected else "⚠️ 使用緩存"
     embed.set_footer(text=f"總指令數: 17個 | 資料庫狀態: {db_status}")
@@ -1421,14 +1421,15 @@ async def profile_slash(interaction: discord.Interaction):
         score_info += f"**總獲得積分：** {total_score} 分\n"
         score_info += f"**可用積分：** {current_score} 分\n\n"
         score_info += f"**積分規則：**\n"
-        score_info += f"• 簽到：+{SIGNUP_SCORE}分\n"
-        for profession, bonus in PROFESSION_BONUS.items():
-            if bonus > 0:
-                score_info += f"• {profession}：+{bonus}分\n"
-        score_info += f"• 優秀：+{RATING_SCORES['優秀']}分\n"
-        score_info += f"• 良好：+{RATING_SCORES['良好']}分\n"
-        score_info += f"• 普通：{RATING_SCORES['普通']}分（預設）\n"
-        score_info += f"• 不合格：{RATING_SCORES['不合格']}分"
+score_info += f"• 聊天：每句話 +{CHAT_SCORE}分（每日上限 {DAILY_CHAT_LIMIT}分）\n"
+score_info += f"• 簽到：+{SIGNUP_SCORE}分\n"
+for profession, bonus in PROFESSION_BONUS.items():
+    if bonus > 0:
+        score_info += f"• {profession}：+{bonus}分\n"
+score_info += f"• 優秀：+{RATING_SCORES['優秀']}分\n"
+score_info += f"• 良好：+{RATING_SCORES['良好']}分\n"
+score_info += f"• 普通：{RATING_SCORES['普通']}分（預設）\n"
+score_info += f"• 不合格：{RATING_SCORES['不合格']}分"
         
         embed.add_field(
             name="💰 積分統計",
@@ -4590,6 +4591,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
