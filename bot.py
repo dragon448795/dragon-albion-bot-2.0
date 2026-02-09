@@ -3947,13 +3947,15 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    # 忽略指令訊息
-    if message.content.startswith(('!', '/', bot.command_prefix)):
-        await bot.process_commands(message)
-        return
-    
     try:
-        # 添加聊天積分
+        # 檢查是否為指令
+        ctx = await bot.get_context(message)
+        if ctx.valid:
+            # 如果是有效指令，交給指令系統處理
+            await bot.invoke(ctx)
+            return
+        
+        # 如果不是指令，處理聊天積分
         guild_id = get_guild_id(message)
         added_score, daily_limit = await add_chat_score(
             message.author.id, 
@@ -3961,29 +3963,30 @@ async def on_message(message):
             guild_id
         )
         
+        # 記錄但減少通知頻率
         if added_score > 0:
             # 獲取用戶當前的聊天積分狀態
             current_score, total_score = await get_user_score(message.author.id, guild_id)
             
-            # 增加通知頻率（每5句話通知一次）
-            if random.random() < 0.2:  # 20% 機率通知
+            # 降低通知頻率到 2%
+            if random.random() < 0.02 and added_score == CHAT_SCORE:
                 responses = [
                     f"💬 {message.author.mention} 聊天 +{added_score} 分！",
-                    f"✨ {message.author.mention} 活躍獎勵 +{added_score} 分！",
-                    f"🎯 {message.author.mention} 發言獲得 +{added_score} 分！",
                     f"💭 {message.author.mention} 目前積分：{current_score} 分"
                 ]
-                
-                # 如果是第一次獲得積分或達到上限時通知
-                if current_score <= added_score or current_score >= DAILY_CHAT_LIMIT:
-                    notification = random.choice(responses)
-                    await message.channel.send(notification, delete_after=8)
+                notification = random.choice(responses)
+                try:
+                    await message.channel.send(notification, delete_after=5)
+                except Exception as e:
+                    print(f"❌ 發送聊天積分通知失敗: {e}")
+                    
+            print(f"💬 {message.author.name} 獲得聊天積分: +{added_score}分，目前: {current_score}分")
                     
     except Exception as e:
-        print(f"❌ 處理聊天積分錯誤: {e}")
+        print(f"❌ 處理訊息錯誤: {e}")
+        traceback.print_exc()
     
-    # 繼續處理其他事件
-    await bot.process_commands(message)
+    # 不需要再次調用 process_commands，因為我們已經在 ctx.valid 時處理過了
 
 # ========== 事件處理 ==========
 
@@ -4591,6 +4594,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
