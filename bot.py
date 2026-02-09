@@ -1659,13 +1659,16 @@ async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: i
 
 # ========== RPG 輔助函數 ==========
 
-async def create_rpg_player(user_id: int, nickname: str = None):
-    """創建 RPG 玩家角色"""
+async def create_rpg_player(user_id: int, nickname: str = None) -> bool:
+    """創建 RPG 玩家角色（修正版）"""
     if not db.is_connected:
+        print(f"❌ 資料庫未連接，無法創建角色: {user_id}")
         return False
     
     try:
         username = nickname or f"冒險者{user_id}"
+        
+        print(f"🔄 嘗試創建角色: {user_id} - {username}")
         
         # 檢查是否已有角色
         existing = await db.fetchrow(
@@ -1674,58 +1677,116 @@ async def create_rpg_player(user_id: int, nickname: str = None):
         )
         
         if existing:
+            print(f"⚠️ 角色已存在: {user_id}")
             return True  # 已有角色
         
         # 創建新角色
+        print(f"📝 正在創建新角色: {user_id} - {username}")
+        
         await db.execute('''
             INSERT INTO rpg_players (
                 user_id, nickname, level, exp, max_exp,
                 vitality, speed, strength, intelligence, carrying_capacity,
                 current_hp, max_hp, current_mp, max_mp,
-                house_type, storage_capacity
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                house_type, storage_capacity,
+                current_map, current_layer, is_in_town,
+                created_at, last_active, last_heal_time
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         ''',
             user_id,
             username,
-            1,  # level
-            0,  # exp
-            100,  # max_exp
-            RPG_CONFIG["BASE_STATS"]["vitality"],
-            RPG_CONFIG["BASE_STATS"]["speed"],
-            RPG_CONFIG["BASE_STATS"]["strength"],
-            RPG_CONFIG["BASE_STATS"]["intelligence"],
-            RPG_CONFIG["BASE_STATS"]["carrying_capacity"],
-            100,  # current_hp
-            100,  # max_hp
-            50,   # current_mp
-            50,   # max_mp
-            'orphanage',  # house_type
-            20    # storage_capacity
+            1,      # level
+            0,      # exp
+            100,    # max_exp
+            10,     # vitality
+            10,     # speed
+            10,     # strength
+            10,     # intelligence
+            10,     # carrying_capacity
+            100,    # current_hp
+            100,    # max_hp
+            50,     # current_mp
+            50,     # max_mp
+            'orphanage',    # house_type
+            20,             # storage_capacity
+            '新手森林',     # current_map
+            1,              # current_layer
+            True,           # is_in_town
+            datetime.now(), # created_at
+            datetime.now(), # last_active
+            datetime.now()  # last_heal_time
         )
         
-        # 給予初始裝備（木劍和布衣）
-        initial_items = [
-            ("木劍", "weapon", "green", 1, 0, 0, 0, 0, 0, "sword", "普通攻擊", 0, "最基本的劍"),
-            ("布衣", "body", "green", 1, 5, 0, 0, 0, 0, None, None, 0, "最基本的衣服"),
-            ("草鞋", "shoes", "green", 1, 0, 2, 0, 0, 0, None, None, 0, "最基本的鞋子"),
-            ("小紅藥水", "potion", "normal", 1, 0, 0, 0, 0, 0, None, None, 0, "恢復少量HP", "hp", 30),
-            ("小藍藥水", "potion", "normal", 1, 0, 0, 0, 0, 0, None, None, 0, "恢復少量MP", "mp", 20)
-        ]
+        print(f"✅ 基礎角色創建成功: {user_id} - {username}")
         
-        for item in initial_items:
-            item_id = await create_rpg_item(*item)
-            if item_id:
-                await add_item_to_inventory(user_id, item_id, 1, "inventory")
-        
-        # 裝備初始武器
-        weapon_item = await db.fetchrow(
-            "SELECT id FROM rpg_items WHERE owner_id = $1 AND name = '木劍'",
-            user_id
+        # 給予初始裝備（簡化版）
+        # 1. 木劍
+        weapon_id = await db.fetchval('''
+            INSERT INTO rpg_items (
+                name, item_type, rarity, level_requirement,
+                weapon_type, description, base_price
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+        ''',
+            "木劍", "weapon", "green", 1, "sword", "最基本的劍", 50
         )
-        if weapon_item:
-            await equip_item(user_id, weapon_item['id'], "weapon")
         
-        print(f"✅ RPG 角色創建成功: {user_id} ({username})")
+        if weapon_id:
+            # 添加到背包
+            await db.execute('''
+                INSERT INTO rpg_inventory (user_id, item_id, quantity, slot_type, location)
+                VALUES ($1, $2, $3, $4, $5)
+            ''',
+                user_id, weapon_id, 1, "inventory", "personal"
+            )
+            
+            # 裝備武器
+            await db.execute(
+                "UPDATE rpg_players SET weapon_id = $1 WHERE user_id = $2",
+                weapon_id, user_id
+            )
+        
+        # 2. 布衣
+        armor_id = await db.fetchval('''
+            INSERT INTO rpg_items (
+                name, item_type, rarity, level_requirement,
+                vitality_bonus, description, base_price
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id
+        ''',
+            "布衣", "body", "green", 1, 5, "最基本的衣服", 30
+        )
+        
+        if armor_id:
+            await db.execute('''
+                INSERT INTO rpg_inventory (user_id, item_id, quantity, slot_type, location)
+                VALUES ($1, $2, $3, $4, $5)
+            ''',
+                user_id, armor_id, 1, "inventory", "personal"
+            )
+            
+            await db.execute(
+                "UPDATE rpg_players SET body_id = $1 WHERE user_id = $2",
+                armor_id, user_id
+            )
+        
+        # 3. 小紅藥水
+        potion_id = await db.fetchval('''
+            INSERT INTO rpg_items (
+                name, item_type, rarity, level_requirement,
+                potion_type, potion_value, description, base_price
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id
+        ''',
+            "小紅藥水", "potion", "normal", 1, "hp", 30, "恢復少量HP", 20
+        )
+        
+        if potion_id:
+            await db.execute('''
+                INSERT INTO rpg_inventory (user_id, item_id, quantity, slot_type, location)
+                VALUES ($1, $2, $3, $4, $5)
+            ''',
+                user_id, potion_id, 1, "inventory", "personal"
+            )
+        
+        print(f"🎉 RPG 角色創建完成: {user_id} ({username})")
         return True
         
     except Exception as e:
@@ -7306,6 +7367,7 @@ class Bot:
             return self.rpg_adventure(user_id)
         else:
             return "未知的 RPG 指令"
+
 
 
 
