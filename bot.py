@@ -2351,7 +2351,46 @@ class RPGDebugView(discord.ui.View):
         
         await interaction.response.defer(ephemeral=True)
         
-     try:
+        try:
+            success = await create_rpg_player_simple(self.user_id, f"測試角色{self.user_id}")
+            
+            if success:
+                embed = discord.Embed(
+                    title="✅ 測試創建成功",
+                    description="角色已成功創建！",
+                    color=0x00FF00
+                )
+                embed.add_field(
+                    name="🎯 下一步",
+                    value="使用 `/rpg_status` 查看角色狀態",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                embed = discord.Embed(
+                    title="❌ 測試創建失敗",
+                    description="創建過程中發生錯誤",
+                    color=0xFF0000
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ 測試失敗",
+                description=f"錯誤：{str(e)[:100]}",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+    
+    @discord.ui.button(label="測試排行榜", style=discord.ButtonStyle.secondary, emoji="📊")
+    async def test_leaderboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 這不是你的診斷！", ephemeral=True)
+            return
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
             # 獲取 Discord 用戶名和 RPG 玩家資料
             players = await db.fetch(
                 "SELECT user_id, nickname, level FROM rpg_players ORDER BY level DESC, nickname LIMIT 10"
@@ -2400,51 +2439,6 @@ class RPGDebugView(discord.ui.View):
                 color=0xFF0000
             )
             await interaction.followup.send(embed=error_embed, ephemeral=True)
-
-async def create_rpg_player_simple(user_id: int, nickname: str = None) -> bool:
-    """簡化版角色創建（用於測試）"""
-    try:
-        username = nickname or f"冒險者{user_id}"
-        
-        print(f"🧪 測試創建角色: {user_id} - {username}")
-        
-        # 直接插入，不檢查是否已存在
-        await db.execute('''
-            INSERT INTO rpg_players (
-                user_id, nickname, level, exp, max_exp,
-                vitality, speed, strength, intelligence, carrying_capacity,
-                current_hp, max_hp, current_mp, max_mp,
-                house_type, storage_capacity,
-                current_map, current_layer, is_in_town
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-        ''',
-            user_id,
-            username,
-            1,      # level
-            0,      # exp
-            100,    # max_exp
-            10,     # vitality
-            10,     # speed
-            10,     # strength
-            10,     # intelligence
-            10,     # carrying_capacity
-            100,    # current_hp
-            100,    # max_hp
-            50,     # current_mp
-            50,     # max_mp
-            'orphanage',    # house_type
-            20,             # storage_capacity
-            '新手森林',     # current_map
-            1,              # current_layer
-            True            # is_in_town
-        )
-        
-        print(f"✅ 測試創建成功: {user_id}")
-        return True
-        
-    except Exception as e:
-        print(f"❌ 測試創建失敗: {e}")
-        return False
         
 @tree.command(name="help", description="顯示幫助訊息")
 async def help_slash(interaction: discord.Interaction):
@@ -7742,6 +7736,7 @@ class Bot:
             return self.rpg_adventure(user_id)
         else:
             return "未知的 RPG 指令"
+
 
 
 
