@@ -1660,7 +1660,90 @@ async def log_query(query_type: str, user_id: int, parameters: dict, guild_id: i
 # ========== RPG 輔助函數 ==========
 
 async def create_rpg_player(user_id: int, nickname: str = None) -> bool:
-    """創建 RPG 玩家角色（修正版）"""
+    """創建 RPG 玩家角色（修正版）- 使用新的簡單版本"""
+    return await create_rpg_player_simple(user_id, nickname)
+async def get_rpg_player_safe(user_id: int):
+    """安全的 RPG 玩家資料獲取，確保資料庫一致性"""
+    if not db.is_connected:
+        return None
+    
+    try:
+        # 直接查詢資料庫，不依賴緩存
+        player = await db.fetchrow(
+            '''
+            SELECT * FROM rpg_players WHERE user_id = $1
+            ''',
+            user_id
+        )
+        
+        return player
+        
+    except Exception as e:
+        print(f"❌ 獲取 RPG 玩家資料失敗: {e}")
+        return None
+
+async def create_status_embed(user, player):
+    """創建狀態embed"""
+    discord_user = user
+    display_name = discord_user.display_name
+    
+    embed = discord.Embed(
+        title=f"📊 {display_name} 的 RPG 狀態",
+        color=0x7289DA
+    )
+    
+    # 狀態條
+    hp_percent = (player['current_hp'] / player['max_hp']) * 100
+    mp_percent = (player['current_mp'] / player['max_mp']) * 100
+    
+    hp_bar = create_progress_bar(hp_percent, 15)
+    mp_bar = create_progress_bar(mp_percent, 15)
+    
+    embed.add_field(
+        name="❤️‍🩹 狀態",
+        value=(
+            f"**HP：** {hp_bar}\n"
+            f"`{player['current_hp']}/{player['max_hp']}`\n\n"
+            f"**MP：** {mp_bar}\n"
+            f"`{player['current_mp']}/{player['max_mp']}`"
+        ),
+        inline=True
+    )
+    
+    # 基本資訊
+    embed.add_field(
+        name="👤 基本資訊",
+        value=(
+            f"**角色：** {player['nickname']}\n"
+            f"**等級：** {player['level']} 📊\n"
+            f"**經驗：** {player['exp']}/{player['max_exp']} ⭐\n"
+            f"**位置：** {player['current_map']}"
+        ),
+        inline=True
+    )
+    
+    # 屬性
+    embed.add_field(
+        name="📈 屬性",
+        value=(
+            f"**體力：** {player['vitality']} ❤️\n"
+            f"**速度：** {player['speed']} ⚡\n"
+            f"**力量：** {player['strength']} 💪\n"
+            f"**智慧：** {player['intelligence']} 🧠\n"
+            f"**負重：** {player['carrying_capacity']} 🎒"
+        ),
+        inline=True
+    )
+    
+    embed.set_footer(text=f"最後活動: {player['last_active'].strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    if user.avatar:
+        embed.set_thumbnail(url=user.avatar.url)
+    
+    return embed
+
+async def create_rpg_player_simple(user_id: int, nickname: str = None) -> bool:
+    """簡化版 RPG 角色創建，確保資料庫一致性"""
     if not db.is_connected:
         print(f"❌ 資料庫未連接，無法創建角色: {user_id}")
         return False
@@ -1670,19 +1753,19 @@ async def create_rpg_player(user_id: int, nickname: str = None) -> bool:
         
         print(f"🔄 嘗試創建角色: {user_id} - {username}")
         
-        # 檢查是否已有角色
+        # 先嘗試從資料庫獲取，確保準確性
         existing = await db.fetchrow(
             "SELECT user_id FROM rpg_players WHERE user_id = $1",
             user_id
         )
         
         if existing:
-            print(f"⚠️ 角色已存在: {user_id}")
-            return True  # 已有角色
+            print(f"⚠️ 資料庫中角色已存在: {user_id}")
+            return True
         
-        # 創建新角色
-        print(f"📝 正在創建新角色: {user_id} - {username}")
+        print(f"📝 正在創建新角色到資料庫: {user_id} - {username}")
         
+        # 簡單創建，只包含必要欄位
         await db.execute('''
             INSERT INTO rpg_players (
                 user_id, nickname, level, exp, max_exp,
@@ -1718,6 +1801,12 @@ async def create_rpg_player(user_id: int, nickname: str = None) -> bool:
         )
         
         print(f"✅ 基礎角色創建成功: {user_id} - {username}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ 創建 RPG 角色失敗: {e}")
+        traceback.print_exc()
+        return False
         
         # 給予初始裝備（簡化版）
         # 1. 木劍
@@ -4792,17 +4881,15 @@ async def rpg_start_slash(interaction: discord.Interaction, nickname: str = None
         
         user_id = interaction.user.id
         user_name = interaction.user.display_name
+        nickname = nickname or user_name
         
-        # 檢查是否已有角色
-        existing = await db.fetchrow(
-            "SELECT user_id FROM rpg_players WHERE user_id = $1",
-            user_id
-        )
+        # 使用安全的檢查方法
+        existing = await get_rpg_player_safe(user_id)
         
         if existing:
             embed = discord.Embed(
                 title="⚠️ 角色已存在",
-                description="你已經有 RPG 角色了！",
+                description=f"你已經有 RPG 角色 **{existing.get('nickname', '未知')}** 了！",
                 color=0xFFA500
             )
             embed.add_field(
@@ -4813,92 +4900,70 @@ async def rpg_start_slash(interaction: discord.Interaction, nickname: str = None
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        # 創建角色視圖
-        class CharacterCreationView(discord.ui.View):
-            def __init__(self, user_id, user_name, nickname):
-                super().__init__(timeout=120)
-                self.user_id = user_id
-                self.user_name = user_name
-                self.nickname = nickname or user_name
+        # 直接創建角色，不使用複雜的確認流程
+        success = await create_rpg_player_simple(user_id, nickname)
+        
+        if success:
+            embed = discord.Embed(
+                title="🎉 RPG 冒險開始！",
+                description=f"歡迎 **{nickname}** 來到阿爾比恩大陸！",
+                color=0x00FF00
+            )
             
-            @discord.ui.button(label="確認創建", style=discord.ButtonStyle.primary, emoji="✅")
-            async def confirm_create(self, interaction: discord.Interaction, button: discord.ui.Button):
-                if interaction.user.id != self.user_id:
-                    await interaction.response.send_message("❌ 這不是你的角色創建！", ephemeral=True)
-                    return
-                
-                await interaction.response.defer(ephemeral=True)
-                
-                # 創建角色
-                success = await create_rpg_player(self.user_id, self.nickname)
-                
-                if success:
-                    embed = discord.Embed(
-                        title="🎉 RPG 冒險開始！",
-                        description=f"歡迎 **{self.nickname}** 來到阿爾比恩大陸！",
-                        color=0x00FF00
-                    )
-                    
-                    embed.add_field(
-                        name="👤 角色資訊",
-                        value=(
-                            f"**冒險者：** {self.nickname}\n"
-                            f"**初始等級：** 1\n"
-                            f"**初始HP：** 100\n"
-                            f"**初始MP：** 50\n"
-                            f"**所屬：** 小雲孤兒院"
-                        ),
-                        inline=False
-                    )
-                    
-                    embed.add_field(
-                        name="🎒 初始裝備",
-                        value=(
-                            "• 木劍（武器）\n"
-                            "• 布衣（身體）\n"
-                            "• 草鞋（鞋子）\n"
-                            "• 小紅藥水 x1\n"
-                            "• 小藍藥水 x1"
-                        ),
-                        inline=True
-                    )
-                    
-                    embed.add_field(
-                        name="🎯 新手任務",
-                        value=(
-                            "1. 查看狀態 `/rpg_status`\n"
-                            "2. 查看背包 `/rpg_inventory`\n"
-                            "3. 開始冒險 `/rpg_explore`"
-                        ),
-                        inline=True
-                    )
-                    
-                    if interaction.user.avatar:
-                        embed.set_thumbnail(url=interaction.user.avatar.url)
-                    
-                    await interaction.followup.send(embed=embed, ephemeral=False)  # 公開顯示
-                    await interaction.message.delete()  # 刪除創建訊息
-                    
-                else:
-                    embed = discord.Embed(
-                        title="❌ 創建角色失敗",
-                        description="創建過程中發生錯誤，請稍後再試。",
-                        color=0xFF0000
-                    )
-                    await interaction.followup.send(embed=embed, ephemeral=True)
+            embed.add_field(
+                name="👤 角色資訊",
+                value=(
+                    f"**冒險者：** {nickname}\n"
+                    f"**初始等級：** 1\n"
+                    f"**初始HP：** 100\n"
+                    f"**初始MP：** 50\n"
+                    f"**所屬：** 小雲孤兒院"
+                ),
+                inline=False
+            )
             
-            @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="❌")
-            async def cancel_create(self, interaction: discord.Interaction, button: discord.ui.Button):
-                if interaction.user.id != self.user_id:
-                    await interaction.response.send_message("❌ 這不是你的角色創建！", ephemeral=True)
-                    return
-                
-                embed = discord.Embed(
-                    title="❌ 創建已取消",
-                    description="你取消了角色創建。",
-                    color=0xFF0000
-                )
-                await interaction.response.edit_message(embed=embed, view=None)
+            embed.add_field(
+                name="🎒 初始裝備",
+                value=(
+                    "• 木劍（武器）\n"
+                    "• 布衣（身體）\n"
+                    "• 草鞋（鞋子）\n"
+                    "• 小紅藥水 x1\n"
+                    "• 小藍藥水 x1"
+                ),
+                inline=True
+            )
+            
+            embed.add_field(
+                name="🎯 新手任務",
+                value=(
+                    "1. 查看狀態 `/rpg_status`\n"
+                    "2. 查看背包 `/rpg_inventory`\n"
+                    "3. 開始冒險 `/rpg_explore`"
+                ),
+                inline=True
+            )
+            
+            if interaction.user.avatar:
+                embed.set_thumbnail(url=interaction.user.avatar.url)
+            
+            await interaction.followup.send(embed=embed, ephemeral=False)
+            
+        else:
+            embed = discord.Embed(
+                title="❌ 創建角色失敗",
+                description="創建過程中發生錯誤，請稍後再試。",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ RPG 創建失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
         
         # 顯示角色創建確認
         embed = discord.Embed(
@@ -4955,7 +5020,8 @@ async def rpg_status_slash(interaction: discord.Interaction):
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        player = await get_rpg_player(interaction.user.id)
+        # 使用安全的資料庫檢查
+        player = await get_rpg_player_safe(interaction.user.id)
         
         if not player:
             embed = discord.Embed(
@@ -4963,12 +5029,8 @@ async def rpg_status_slash(interaction: discord.Interaction):
                 description="請先使用 `/rpg_start` 創建角色",
                 color=0xFF0000
             )
-            embed.add_field(
-                name="快速創建",
-                value="點擊下方按鈕快速創建角色",
-                inline=False
-            )
             
+            # 修復：確保只有一個創建按鈕視圖
             class QuickCreateView(discord.ui.View):
                 def __init__(self, user_id, user_name):
                     super().__init__(timeout=60)
@@ -4983,8 +5045,8 @@ async def rpg_status_slash(interaction: discord.Interaction):
                     
                     await interaction.response.defer(ephemeral=True)
                     
-                    # 快速創建角色
-                    success = await create_rpg_player(self.user_id, self.user_name)
+                    # 直接創建，不進行複雜檢查
+                    success = await create_rpg_player_simple(self.user_id, self.user_name)
                     
                     if success:
                         embed = discord.Embed(
@@ -4998,12 +5060,30 @@ async def rpg_status_slash(interaction: discord.Interaction):
                             inline=False
                         )
                         await interaction.followup.send(embed=embed, ephemeral=True)
+                        
+                        # 重新發送狀態訊息
+                        new_player = await get_rpg_player_safe(self.user_id)
+                        if new_player:
+                            status_embed = await create_status_embed(interaction.user, new_player)
+                            await interaction.followup.send(embed=status_embed, ephemeral=True)
                     else:
                         await interaction.followup.send("❌ 創建失敗，請稍後再試", ephemeral=True)
             
             view = QuickCreateView(interaction.user.id, interaction.user.display_name)
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             return
+        
+        # 顯示角色狀態
+        embed = await create_status_embed(interaction.user, player)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        
+    except Exception as e:
+        error_embed = discord.Embed(
+            title="❌ 讀取角色狀態失敗",
+            description=f"錯誤：{str(e)}",
+            color=0xFF0000
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
         
         # 修正：使用 Discord 用戶名而不是資料庫中的暱稱
         discord_user = interaction.user
@@ -5213,6 +5293,148 @@ async def rpg_help_slash(interaction: discord.Interaction):
     embed.set_footer(text="RPG 系統開發中，更多功能即將推出！")
     
     await interaction.response.send_message(embed=embed)
+    
+@tree.command(name="rpg_fix", description="修復 RPG 角色資料庫問題")
+async def rpg_fix_slash(interaction: discord.Interaction):
+    """修復 RPG 角色資料庫問題"""
+    await interaction.response.defer(ephemeral=True)
+    
+    if interaction.user.id not in OWNER_IDS:
+        await interaction.followup.send("❌ 只有機器人擁有者可以使用此指令！", ephemeral=True)
+        return
+    
+    try:
+        if not db.is_connected:
+            await interaction.followup.send("❌ 資料庫未連接！", ephemeral=True)
+            return
+        
+        user_id = interaction.user.id
+        
+        embed = discord.Embed(
+            title="🔧 RPG 資料庫修復工具",
+            color=0x7289DA
+        )
+        
+        # 1. 檢查角色是否存在
+        player = await get_rpg_player_safe(user_id)
+        
+        if player:
+            embed.add_field(
+                name="👤 角色狀態",
+                value=f"✅ 資料庫中存在角色: {player.get('nickname', '未知')}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="👤 角色狀態",
+                value="❌ 資料庫中不存在角色",
+                inline=False
+            )
+        
+        # 2. 檢查所有表格
+        tables = ['rpg_players', 'rpg_items', 'rpg_inventory']
+        table_status = []
+        
+        for table in tables:
+            exists = await db.fetchval(f"""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name = '{table}'
+                )
+            """)
+            table_status.append((table, exists))
+        
+        tables_text = ""
+        for table, exists in table_status:
+            status = "✅" if exists else "❌"
+            tables_text += f"{status} {table}\n"
+        
+        embed.add_field(
+            name="📋 資料表狀態",
+            value=tables_text,
+            inline=False
+        )
+        
+        # 3. 修復選項
+        embed.add_field(
+            name="🛠️ 修復選項",
+            value="點擊下方按鈕執行修復",
+            inline=False
+        )
+        
+        class FixView(discord.ui.View):
+            def __init__(self, user_id):
+                super().__init__(timeout=60)
+                self.user_id = user_id
+            
+            @discord.ui.button(label="刪除並重建角色", style=discord.ButtonStyle.danger, emoji="🗑️")
+            async def delete_and_recreate(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的操作！", ephemeral=True)
+                    return
+                
+                await interaction.response.defer(ephemeral=True)
+                
+                try:
+                    # 刪除舊角色
+                    await db.execute(
+                        "DELETE FROM rpg_players WHERE user_id = $1",
+                        self.user_id
+                    )
+                    
+                    # 刪除相關物品
+                    await db.execute(
+                        "DELETE FROM rpg_inventory WHERE user_id = $1",
+                        self.user_id
+                    )
+                    
+                    # 創建新角色
+                    success = await create_rpg_player_simple(
+                        self.user_id, 
+                        f"冒險者{self.user_id}"
+                    )
+                    
+                    if success:
+                        embed = discord.Embed(
+                            title="✅ 角色已重置",
+                            description="角色已成功刪除並重新創建",
+                            color=0x00FF00
+                        )
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                    else:
+                        await interaction.followup.send("❌ 重置失敗", ephemeral=True)
+                        
+                except Exception as e:
+                    await interaction.followup.send(f"❌ 重置失敗: {e}", ephemeral=True)
+            
+            @discord.ui.button(label="強制創建角色", style=discord.ButtonStyle.primary, emoji="⚡")
+            async def force_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的操作！", ephemeral=True)
+                    return
+                
+                await interaction.response.defer(ephemeral=True)
+                
+                success = await create_rpg_player_simple(
+                    self.user_id, 
+                    f"冒險者{self.user_id}"
+                )
+                
+                if success:
+                    embed = discord.Embed(
+                        title="✅ 強制創建成功",
+                        description="角色已強制創建",
+                        color=0x00FF00
+                    )
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ 強制創建失敗", ephemeral=True)
+        
+        await interaction.followup.send(embed=embed, view=FixView(interaction.user.id), ephemeral=True)
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ 修復工具錯誤: {e}", ephemeral=True)
 
 # ========== 事件處理 ==========
 
@@ -7736,6 +7958,7 @@ class Bot:
             return self.rpg_adventure(user_id)
         else:
             return "未知的 RPG 指令"
+
 
 
 
