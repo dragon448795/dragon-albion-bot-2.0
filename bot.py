@@ -2351,39 +2351,55 @@ class RPGDebugView(discord.ui.View):
         
         await interaction.response.defer(ephemeral=True)
         
-        try:
-            # 直接執行創建角色
-            success = await create_rpg_player_simple(interaction.user.id, "測試角色")
-            
-            if success:
-                await interaction.followup.send("✅ 測試創建成功！請使用 `/rpg_status` 查看", ephemeral=True)
-            else:
-                await interaction.followup.send("❌ 測試創建失敗", ephemeral=True)
-                
-        except Exception as e:
-            await interaction.followup.send(f"❌ 測試失敗: {str(e)[:100]}", ephemeral=True)
-    
-    @discord.ui.button(label="查看所有用戶", style=discord.ButtonStyle.secondary, emoji="👥")
-    async def view_all_players(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ 這不是你的診斷！", ephemeral=True)
-            return
-        
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
+     try:
+            # 獲取 Discord 用戶名和 RPG 玩家資料
             players = await db.fetch(
-                "SELECT user_id, nickname, level FROM rpg_players ORDER BY level DESC LIMIT 10"
+                "SELECT user_id, nickname, level FROM rpg_players ORDER BY level DESC, nickname LIMIT 10"
             )
             
             if players:
-                player_list = "\n".join([f"• {p['nickname']} (ID: {p['user_id']}) Lv.{p['level']}" for p in players])
-                await interaction.followup.send(f"**👥 RPG 玩家列表 (前10名)**\n{player_list}", ephemeral=True)
+                player_list = []
+                for p in players:
+                    user_id = p['user_id']
+                    nickname = p['nickname']
+                    level = p['level']
+                    
+                    # 嘗試獲取 Discord 用戶
+                    try:
+                        discord_user = await interaction.guild.fetch_member(user_id)
+                        username = discord_user.display_name
+                    except:
+                        username = f"用戶{user_id}"  # 如果無法獲取，使用備用名稱
+                    
+                    player_list.append(f"• **{username}** ({nickname}) Lv.{level}")
+                
+                embed = discord.Embed(
+                    title="👥 RPG 玩家排行榜 (前10名)",
+                    description="\n".join(player_list),
+                    color=0x7289DA
+                )
+                
+                total_players = await db.fetchval(
+                    "SELECT COUNT(*) FROM rpg_players"
+                ) or 0
+                
+                embed.set_footer(text=f"總玩家數: {total_players}")
+                await interaction.followup.send(embed=embed, ephemeral=True)
             else:
-                await interaction.followup.send("❌ 資料庫中沒有任何 RPG 玩家", ephemeral=True)
+                embed = discord.Embed(
+                    title="👥 RPG 玩家列表",
+                    description="目前還沒有任何 RPG 玩家",
+                    color=0xFFA500
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
                 
         except Exception as e:
-            await interaction.followup.send(f"❌ 查詢失敗: {str(e)[:100]}", ephemeral=True)
+            error_embed = discord.Embed(
+                title="❌ 查詢失敗",
+                description=f"錯誤：{str(e)[:100]}",
+                color=0xFF0000
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 async def create_rpg_player_simple(user_id: int, nickname: str = None) -> bool:
     """簡化版角色創建（用於測試）"""
@@ -4767,8 +4783,8 @@ async def activity_stats_slash(interaction: discord.Interaction):
 @tree.command(name="rpg_start", description="開始 RPG 冒險")
 @app_commands.describe(nickname="角色暱稱（可選）")
 async def rpg_start_slash(interaction: discord.Interaction, nickname: str = None):
-    """開始 RPG 冒險"""
-    await interaction.response.defer()
+    """開始 RPG 冒險 - 修正版"""
+    await interaction.response.defer(ephemeral=True)
     
     try:
         if not db.is_connected:
@@ -4777,82 +4793,163 @@ async def rpg_start_slash(interaction: discord.Interaction, nickname: str = None
                 description="無法開始 RPG 冒險，請稍後再試。",
                 color=0xFFA500
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
-        success = await create_rpg_player(interaction.user.id, nickname)
+        user_id = interaction.user.id
+        user_name = interaction.user.display_name
         
-        if success:
+        # 檢查是否已有角色
+        existing = await db.fetchrow(
+            "SELECT user_id FROM rpg_players WHERE user_id = $1",
+            user_id
+        )
+        
+        if existing:
             embed = discord.Embed(
-                title="🎮 RPG 冒險開始！",
-                description="歡迎來到阿爾比恩大陸！",
-                color=0x00FF00
+                title="⚠️ 角色已存在",
+                description="你已經有 RPG 角色了！",
+                color=0xFFA500
             )
-            
             embed.add_field(
-                name="👤 角色資訊",
-                value=(
-                    f"**冒險者：** {nickname or interaction.user.name}\n"
-                    f"**初始等級：** 1\n"
-                    f"**初始HP：** 100\n"
-                    f"**初始MP：** 50\n"
-                    f"**所屬：** 小雲孤兒院"
-                ),
+                name="📝 建議操作",
+                value="使用 `/rpg_status` 查看角色狀態\n使用 `/rpg_help` 查看所有指令",
                 inline=False
             )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        # 創建角色視圖
+        class CharacterCreationView(discord.ui.View):
+            def __init__(self, user_id, user_name, nickname):
+                super().__init__(timeout=120)
+                self.user_id = user_id
+                self.user_name = user_name
+                self.nickname = nickname or user_name
             
-            embed.add_field(
-                name="🎒 初始裝備",
-                value=(
-                    "• 木劍（武器）\n"
-                    "• 布衣（身體）\n"
-                    "• 草鞋（鞋子）\n"
-                    "• 小紅藥水 x1\n"
-                    "• 小藍藥水 x1"
-                ),
-                inline=True
-            )
+            @discord.ui.button(label="確認創建", style=discord.ButtonStyle.primary, emoji="✅")
+            async def confirm_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的角色創建！", ephemeral=True)
+                    return
+                
+                await interaction.response.defer(ephemeral=True)
+                
+                # 創建角色
+                success = await create_rpg_player(self.user_id, self.nickname)
+                
+                if success:
+                    embed = discord.Embed(
+                        title="🎉 RPG 冒險開始！",
+                        description=f"歡迎 **{self.nickname}** 來到阿爾比恩大陸！",
+                        color=0x00FF00
+                    )
+                    
+                    embed.add_field(
+                        name="👤 角色資訊",
+                        value=(
+                            f"**冒險者：** {self.nickname}\n"
+                            f"**初始等級：** 1\n"
+                            f"**初始HP：** 100\n"
+                            f"**初始MP：** 50\n"
+                            f"**所屬：** 小雲孤兒院"
+                        ),
+                        inline=False
+                    )
+                    
+                    embed.add_field(
+                        name="🎒 初始裝備",
+                        value=(
+                            "• 木劍（武器）\n"
+                            "• 布衣（身體）\n"
+                            "• 草鞋（鞋子）\n"
+                            "• 小紅藥水 x1\n"
+                            "• 小藍藥水 x1"
+                        ),
+                        inline=True
+                    )
+                    
+                    embed.add_field(
+                        name="🎯 新手任務",
+                        value=(
+                            "1. 查看狀態 `/rpg_status`\n"
+                            "2. 查看背包 `/rpg_inventory`\n"
+                            "3. 開始冒險 `/rpg_explore`"
+                        ),
+                        inline=True
+                    )
+                    
+                    if interaction.user.avatar:
+                        embed.set_thumbnail(url=interaction.user.avatar.url)
+                    
+                    await interaction.followup.send(embed=embed, ephemeral=False)  # 公開顯示
+                    await interaction.message.delete()  # 刪除創建訊息
+                    
+                else:
+                    embed = discord.Embed(
+                        title="❌ 創建角色失敗",
+                        description="創建過程中發生錯誤，請稍後再試。",
+                        color=0xFF0000
+                    )
+                    await interaction.followup.send(embed=embed, ephemeral=True)
             
-            embed.add_field(
-                name="🎯 屬性點系統",
-                value=(
-                    f"**每級獲得：** {RPG_CONFIG['STAT_POINTS_PER_LEVEL']} 點\n"
-                    "**可分配屬性：**\n"
-                    "• 體力（❤️）\n"
-                    "• 速度（⚡）\n"
-                    "• 力量（💪）\n"
-                    "• 智慧（🧠）\n"
-                    "• 負重（🎒）"
-                ),
-                inline=True
-            )
-            
-            embed.set_footer(text="使用 /rpg_status 查看角色狀態 | /rpg_help 查看所有指令")
-            
-            if interaction.user.avatar:
-                embed.set_thumbnail(url=interaction.user.avatar.url)
-            
-            await interaction.followup.send(embed=embed)
-        else:
-            embed = discord.Embed(
-                title="❌ 創建角色失敗",
-                description="可能已經有角色存在，或資料庫錯誤。",
-                color=0xFF0000
-            )
-            await interaction.followup.send(embed=embed)
-            
+            @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary, emoji="❌")
+            async def cancel_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的角色創建！", ephemeral=True)
+                    return
+                
+                embed = discord.Embed(
+                    title="❌ 創建已取消",
+                    description="你取消了角色創建。",
+                    color=0xFF0000
+                )
+                await interaction.response.edit_message(embed=embed, view=None)
+        
+        # 顯示角色創建確認
+        embed = discord.Embed(
+            title="🎮 創建 RPG 角色",
+            description="請確認角色資訊：",
+            color=0x7289DA
+        )
+        
+        embed.add_field(
+            name="👤 角色資訊",
+            value=(
+                f"**Discord用戶：** {user_name}\n"
+                f"**角色暱稱：** {nickname or user_name}\n"
+                f"**創建時間：** {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            ),
+            inline=False
+        )
+        
+        embed.add_field(
+            name="📦 初始獎勵",
+            value=(
+                "• 基礎裝備一套\n"
+                "• 初級藥水各一瓶\n"
+                "• 小雲孤兒院住宅"
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text="點擊確認創建開始你的冒險！")
+        
+        view = CharacterCreationView(user_id, user_name, nickname)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        
     except Exception as e:
         error_embed = discord.Embed(
             title="❌ RPG 創建失敗",
             description=f"錯誤：{str(e)}",
             color=0xFF0000
         )
-        await interaction.followup.send(embed=error_embed)
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 @tree.command(name="rpg_status", description="查看角色狀態")
 async def rpg_status_slash(interaction: discord.Interaction):
-    """查看角色狀態"""
-    await interaction.response.defer()
+    """查看角色狀態 - 修正版"""
+    await interaction.response.defer(ephemeral=True)
     
     try:
         if not db.is_connected:
@@ -4861,7 +4958,7 @@ async def rpg_status_slash(interaction: discord.Interaction):
                 description="無法讀取角色狀態，請稍後再試。",
                 color=0xFFA500
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             return
         
         player = await get_rpg_player(interaction.user.id)
@@ -4872,24 +4969,55 @@ async def rpg_status_slash(interaction: discord.Interaction):
                 description="請先使用 `/rpg_start` 創建角色",
                 color=0xFF0000
             )
-            await interaction.followup.send(embed=embed)
+            embed.add_field(
+                name="快速創建",
+                value="點擊下方按鈕快速創建角色",
+                inline=False
+            )
+            
+            class QuickCreateView(discord.ui.View):
+                def __init__(self, user_id, user_name):
+                    super().__init__(timeout=60)
+                    self.user_id = user_id
+                    self.user_name = user_name
+                
+                @discord.ui.button(label="快速創建", style=discord.ButtonStyle.primary, emoji="⚡")
+                async def quick_create(self, interaction: discord.Interaction, button: discord.ui.Button):
+                    if interaction.user.id != self.user_id:
+                        await interaction.response.send_message("❌ 這不是你的操作！", ephemeral=True)
+                        return
+                    
+                    await interaction.response.defer(ephemeral=True)
+                    
+                    # 快速創建角色
+                    success = await create_rpg_player(self.user_id, self.user_name)
+                    
+                    if success:
+                        embed = discord.Embed(
+                            title="✅ 角色創建成功！",
+                            description=f"已為你創建角色 **{self.user_name}**",
+                            color=0x00FF00
+                        )
+                        embed.add_field(
+                            name="下一步",
+                            value="使用 `/rpg_status` 查看角色狀態",
+                            inline=False
+                        )
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                    else:
+                        await interaction.followup.send("❌ 創建失敗，請稍後再試", ephemeral=True)
+            
+            view = QuickCreateView(interaction.user.id, interaction.user.display_name)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
             return
         
-        embed = discord.Embed(
-            title=f"📊 {player['nickname']} 的狀態",
-            color=0x7289DA
-        )
+        # 修正：使用 Discord 用戶名而不是資料庫中的暱稱
+        discord_user = interaction.user
+        display_name = discord_user.display_name
         
-        # 基本信息
-        embed.add_field(
-            name="👤 基本信息",
-            value=(
-                f"**等級：** {player['level']} 📊\n"
-                f"**經驗：** {player['exp']}/{player['max_exp']} ⭐\n"
-                f"**下一級：** {player['exp_to_next'] - player['exp']} ⭐\n"
-                f"**戰鬥力：** {player['combat_power']} ⚔️"
-            ),
-            inline=False
+        embed = discord.Embed(
+            title=f"📊 {display_name} 的 RPG 狀態",
+            color=0x7289DA
         )
         
         # 狀態條
@@ -4910,6 +5038,18 @@ async def rpg_status_slash(interaction: discord.Interaction):
             inline=True
         )
         
+        # 基本資訊
+        embed.add_field(
+            name="👤 基本資訊",
+            value=(
+                f"**角色：** {player['nickname']}\n"
+                f"**等級：** {player['level']} 📊\n"
+                f"**經驗：** {player['exp']}/{player['max_exp']} ⭐\n"
+                f"**戰鬥力：** {player.get('combat_power', 0)} ⚔️"
+            ),
+            inline=True
+        )
+        
         # 屬性
         embed.add_field(
             name="📈 屬性",
@@ -4918,53 +5058,18 @@ async def rpg_status_slash(interaction: discord.Interaction):
                 f"**速度：** {player['speed']} ⚡\n"
                 f"**力量：** {player['strength']} 💪\n"
                 f"**智慧：** {player['intelligence']} 🧠\n"
-                f"**負重：** {player['carrying_capacity']} 🎒\n"
-                f"**剩餘點數：** {player['remaining_stat_points']} ✨"
+                f"**負重：** {player['carrying_capacity']} 🎒"
             ),
             inline=True
         )
         
-        # 裝備
-        equipment = []
-        slots = {
-            "武器": player['weapon_name'],
-            "頭部": player['head_name'],
-            "身體": player['body_name'],
-            "鞋子": player['shoes_name'],
-            "項鍊": player['necklace_name'],
-            "戒指": player['ring_name'],
-            "背包": player['backpack_name']
-        }
-        
-        for slot, item_name in slots.items():
-            if item_name:
-                equipment.append(f"• {slot}：{item_name}")
-            else:
-                equipment.append(f"• {slot}：無")
-        
-        embed.add_field(
-            name="⚔️ 裝備",
-            value="\n".join(equipment),
-            inline=False
-        )
-        
-        # 位置與房屋
+        # 位置
         embed.add_field(
             name="📍 位置",
             value=(
-                f"**所在地圖：** {player['current_map']}\n"
-                f"**當前層數：** {player['current_layer']}\n"
-                f"**是否在城鎮：** {'✅' if player['is_in_town'] else '❌'}"
-            ),
-            inline=True
-        )
-        
-        house_info = RPG_CONFIG['HOUSES'].get(player['house_type'], {})
-        embed.add_field(
-            name="🏠 房屋",
-            value=(
-                f"**房屋類型：** {house_info.get('name', '未知')}\n"
-                f"**倉庫容量：** {player['storage_capacity']}格"
+                f"**地圖：** {player['current_map']}\n"
+                f"**層數：** {player['current_layer']}\n"
+                f"**狀態：** {'城鎮中' if player['is_in_town'] else '探索中'}"
             ),
             inline=True
         )
@@ -4975,10 +5080,22 @@ async def rpg_status_slash(interaction: discord.Interaction):
             value=(
                 f"**擊敗怪物：** {player['monsters_killed']}隻\n"
                 f"**死亡次數：** {player['deaths']}次\n"
-                f"**總傷害：** {player['total_damage']}\n"
-                f"**總治療：** {player['total_healing']}"
+                f"**總傷害：** {player['total_damage']}"
             ),
-            inline=False
+            inline=True
+        )
+        
+        # 房屋
+        house_info = RPG_CONFIG['HOUSES'].get(player['house_type'], {})
+        house_name = house_info.get('name', '未知')
+        
+        embed.add_field(
+            name="🏠 房屋",
+            value=(
+                f"**類型：** {house_name}\n"
+                f"**倉庫容量：** {player['storage_capacity']}格"
+            ),
+            inline=True
         )
         
         embed.set_footer(text=f"最後活動: {player['last_active'].strftime('%Y-%m-%d %H:%M:%S')}")
@@ -4986,7 +5103,34 @@ async def rpg_status_slash(interaction: discord.Interaction):
         if interaction.user.avatar:
             embed.set_thumbnail(url=interaction.user.avatar.url)
         
-        await interaction.followup.send(embed=embed)
+        # 添加操作按鈕
+        class StatusView(discord.ui.View):
+            def __init__(self, user_id):
+                super().__init__(timeout=60)
+                self.user_id = user_id
+            
+            @discord.ui.button(label="查看背包", style=discord.ButtonStyle.secondary, emoji="🎒", row=0)
+            async def view_inventory(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的狀態！", ephemeral=True)
+                    return
+                
+                # 這裡可以添加查看背包的邏輯
+                await interaction.response.send_message("背包功能開發中...", ephemeral=True)
+            
+            @discord.ui.button(label="開始冒險", style=discord.ButtonStyle.primary, emoji="⚔️", row=0)
+            async def start_adventure(self, interaction: discord.Interaction, button: discord.ui.Button):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("❌ 這不是你的狀態！", ephemeral=True)
+                    return
+                
+                if not player['is_in_town']:
+                    await interaction.response.send_message("❌ 你已經在冒險中了！", ephemeral=True)
+                    return
+                
+                await interaction.response.send_message("冒險功能開發中...", ephemeral=True)
+        
+        await interaction.followup.send(embed=embed, view=StatusView(interaction.user.id), ephemeral=True)
         
     except Exception as e:
         error_embed = discord.Embed(
@@ -4994,7 +5138,7 @@ async def rpg_status_slash(interaction: discord.Interaction):
             description=f"錯誤：{str(e)}",
             color=0xFF0000
         )
-        await interaction.followup.send(embed=error_embed)
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 @tree.command(name="rpg_help", description="顯示 RPG 幫助訊息")
 async def rpg_help_slash(interaction: discord.Interaction):
@@ -7598,6 +7742,7 @@ class Bot:
             return self.rpg_adventure(user_id)
         else:
             return "未知的 RPG 指令"
+
 
 
 
