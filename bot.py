@@ -4675,8 +4675,36 @@ try:
         if original_on_ready:
             await original_on_ready()
         
+        # ========== 關鍵修正：延遲初始化，確保 Bot 完全就緒 ==========
+        await asyncio.sleep(2)  # 等待 2 秒，確保連接穩定
+        
         # 初始化 RPG
         await rpg.initialize()
+        
+        # 註冊 RPG 指令
+        await rpg.register_commands(bot.tree)
+        
+        # ========== 只同步 RPG 指令，不影響原有指令 ==========
+        try:
+            # 只同步 rpg 群組
+            await bot.tree.sync(guild=None)  # None = 全域同步
+            print("✅ RPG 指令全域同步完成")
+            
+            # 驗證指令是否存在
+            rpg_command = bot.tree.get_command('rpg')
+            if rpg_command:
+                print(f"✅ RPG 指令驗證成功: /rpg")
+            else:
+                print(f"❌ RPG 指令驗證失敗")
+                
+        except Exception as e:
+            print(f"❌ RPG 指令同步失敗: {e}")
+    
+    print("🔌 RPG 系統載入點已準備")
+    
+except ImportError as e:
+    print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
+    rpg = None
         
         # ========== 關鍵修正：先註冊指令，再同步 ==========
         # 註冊 RPG 指令到 tree
@@ -4707,6 +4735,7 @@ try:
 except ImportError as e:
     print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
     rpg = None
+
 
 
 
