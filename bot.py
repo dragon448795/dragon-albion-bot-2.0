@@ -4661,6 +4661,42 @@ def main():
 if __name__ == "__main__":
     main()
 
+# ========== RPG 系統整合（完全獨立，不影響原有功能）==========
+try:
+    # 嘗試導入 RPG 系統
+    from rpg_system import RPGSystem, get_rpg_system
+    
+    # 初始化 RPG 系統（傳入 bot, db, memory_cache）
+    rpg = get_rpg_system(bot, db, memory_cache)
+    
+    # 非同步初始化 RPG 系統
+    async def init_rpg():
+        await rpg.initialize()
+        await rpg.register_commands(tree)
+        print("✅ RPG 系統已成功整合")
+    
+    # 在 on_ready 最後加入
+    original_on_ready = bot.event
+    @bot.event
+    async def on_ready_with_rpg():
+        # 呼叫原有的 on_ready（如果有的話）
+        if hasattr(bot, '_original_on_ready'):
+            await bot._original_on_ready()
+        
+        # 初始化 RPG
+        await init_rpg()
+    
+    # 保存原有 on_ready
+    if hasattr(bot, 'on_ready'):
+        bot._original_on_ready = bot.on_ready
+    bot.on_ready = on_ready_with_rpg
+    
+    print("🔌 RPG 系統載入點已準備")
+    
+except ImportError as e:
+    print(f"ℹ️ 未檢測到 RPG 系統模組，如需使用請建立 rpg_system.py")
+    print(f"   錯誤訊息: {e}")
+    rpg = None
 
 
 
