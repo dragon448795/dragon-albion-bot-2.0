@@ -4646,8 +4646,3 @@ except Exception as e:
 if __name__ == "__main__":
     main()
 
-
-# ========== 啟動機器人 ==========
-if __name__ == "__main__":
-    main()
-
