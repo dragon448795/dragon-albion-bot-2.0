@@ -4663,41 +4663,50 @@ if __name__ == "__main__":
 
 # ========== RPG 系統整合（完全獨立，不影響原有功能）==========
 try:
-    # 嘗試導入 RPG 系統
     from rpg_system import RPGSystem, get_rpg_system
-    
-    # 初始化 RPG 系統（傳入 bot, db, memory_cache）
     rpg = get_rpg_system(bot, db, memory_cache)
     
-    # 非同步初始化 RPG 系統
-    async def init_rpg():
-        await rpg.initialize()
-        await rpg.register_commands(tree)
-        print("✅ RPG 系統已成功整合")
+    # 儲存原本的 on_ready
+    original_on_ready = bot.on_ready
     
-    # 在 on_ready 最後加入
-    original_on_ready = bot.event
     @bot.event
-    async def on_ready_with_rpg():
-        # 呼叫原有的 on_ready（如果有的話）
-        if hasattr(bot, '_original_on_ready'):
-            await bot._original_on_ready()
+    async def on_ready():
+        # 先執行原本的 on_ready
+        if original_on_ready:
+            await original_on_ready()
         
         # 初始化 RPG
-        await init_rpg()
-    
-    # 保存原有 on_ready
-    if hasattr(bot, 'on_ready'):
-        bot._original_on_ready = bot.on_ready
-    bot.on_ready = on_ready_with_rpg
+        await rpg.initialize()
+        
+        # ========== 關鍵修正：先註冊指令，再同步 ==========
+        # 註冊 RPG 指令到 tree
+        await rpg.register_commands(bot.tree)
+        print("✅ RPG 指令已註冊到指令樹")
+        
+        # 強制同步所有指令（包括原有的 + RPG）
+        try:
+            # 這裡會同步「所有」已註冊的指令
+            synced = await bot.tree.sync()
+            print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
+            
+            # 列出所有指令名稱
+            cmd_names = [cmd.name for cmd in synced]
+            print(f"📋 已同步指令: {', '.join(cmd_names)}")
+            
+            # 確認 RPG 指令是否存在
+            if 'rpg' in cmd_names:
+                print("✅ RPG 指令群組已成功同步！")
+            else:
+                print("❌ RPG 指令群組同步失敗！")
+                
+        except Exception as e:
+            print(f"❌ 指令同步失敗: {e}")
     
     print("🔌 RPG 系統載入點已準備")
     
 except ImportError as e:
-    print(f"ℹ️ 未檢測到 RPG 系統模組，如需使用請建立 rpg_system.py")
-    print(f"   錯誤訊息: {e}")
+    print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
     rpg = None
-
 
 
 
