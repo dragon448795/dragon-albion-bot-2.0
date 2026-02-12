@@ -223,61 +223,56 @@ class RPGSystem:
             import traceback
             traceback.print_exc()
     
-    async def register_commands(self, tree):
-        """註冊 RPG 專屬指令"""
-        
-        # 建立 RPG 指令群組
-        rpg_group = app_commands.Group(
-            name="rpg", 
-            description="🎮 RPG 冒險系統（獨立於原有功能）"
+  async def register_commands(self, tree):
+    """註冊 RPG 專屬指令，並回傳註冊的指令數量"""
+    
+    # 建立 RPG 指令群組
+    rpg_group = app_commands.Group(
+        name="rpg", 
+        description="🎮 RPG 冒險系統（獨立於原有功能）"
+    )
+    
+    @rpg_group.command(name="version", description="查看 RPG 系統版本")
+    async def rpg_version(interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "🎮 RPG 系統 v0.1 - 資料庫已準備就緒",
+            ephemeral=True
         )
+    
+    @rpg_group.command(name="status", description="檢查 RPG 資料庫狀態")
+    async def rpg_status(interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         
-        @rpg_group.command(name="version", description="查看 RPG 系統版本")
-        async def rpg_version(interaction: discord.Interaction):
-            await interaction.response.send_message(
-                "🎮 RPG 系統 v0.1 - 資料庫已準備就緒",
-                ephemeral=True
+        if not self.db.is_connected:
+            await interaction.followup.send("❌ RPG 系統：資料庫未連接")
+            return
+        
+        try:
+            tables = await self.db.fetch("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public' 
+                AND table_name LIKE 'rpg_%'
+            """)
+            
+            embed = discord.Embed(
+                title="🎮 RPG 系統狀態",
+                color=0x00FF00
             )
-        
-        @rpg_group.command(name="status", description="檢查 RPG 資料庫狀態")
-        async def rpg_status(interaction: discord.Interaction):
-            await interaction.response.defer(ephemeral=True)
             
-            if not self.db.is_connected:
-                await interaction.followup.send("❌ RPG 系統：資料庫未連接")
-                return
+            embed.add_field(name="📊 RPG 表格數量", value=f"{len(tables)} 個", inline=True)
+            embed.add_field(name="🔌 資料庫連接", value="✅ 正常", inline=True)
             
-            try:
-                # 檢查 RPG 表格數量
-                tables = await self.db.fetch("""
-                    SELECT table_name 
-                    FROM information_schema.tables 
-                    WHERE table_schema = 'public' 
-                    AND table_name LIKE 'rpg_%'
-                """)
-                
-                embed = discord.Embed(
-                    title="🎮 RPG 系統狀態",
-                    color=0x00FF00
-                )
-                
-                embed.add_field(name="📊 RPG 表格數量", value=f"{len(tables)} 個", inline=True)
-                embed.add_field(name="🔌 資料庫連接", value="✅ 正常", inline=True)
-                
-                if tables:
-                    table_list = "\n".join([f"• {t['table_name']}" for t in tables[:5]])
-                    if len(tables) > 5:
-                        table_list += f"\n... 還有 {len(tables)-5} 個"
-                    embed.add_field(name="📋 表格列表", value=table_list, inline=False)
-                
-                await interaction.followup.send(embed=embed)
-                
-            except Exception as e:
-                await interaction.followup.send(f"❌ 檢查失敗: {e}")
-        
-        # 註冊群組
-        tree.add_command(rpg_group)
-        print("✅ RPG 系統：指令註冊完成 (/rpg version, /rpg status)")
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ 檢查失敗: {e}")
+    
+    # 將群組加到指令樹
+    tree.add_command(rpg_group)
+    
+    # 回傳註冊的指令數量
+    return 1  # 一個群組
 
 # ========== 單例模式 ==========
 _rpg_instance = None
