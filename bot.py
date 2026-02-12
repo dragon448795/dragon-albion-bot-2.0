@@ -4593,13 +4593,24 @@ def main():
         traceback.print_exc()
 
 # ========== RPG 系統整合（完全獨立，不影響原有功能）==========
+# 注意：這是最終版本，只保留一個完整的載入區塊
 try:
     print("🔄 正在載入 RPG 系統模組...")
-    from rpg_system import RPGSystem, get_rpg_system
     
-    # 建立全域 RPG 實例
+    # 嘗試導入模組化版本
+    try:
+        from rpg_system import RPGSystem, get_rpg_system
+        from rpg_system.commands import register_all_commands
+        MODULAR_MODE = True
+        print("✅ 使用模組化 RPG 系統")
+    except ImportError:
+        # 如果沒有模組化版本，使用單一檔案版本
+        from rpg_system import RPGSystem, get_rpg_system
+        MODULAR_MODE = False
+        print("✅ 使用單一檔案 RPG 系統")
+    
+    # 建立 RPG 實例
     rpg = get_rpg_system(bot, db, memory_cache)
-    print("✅ RPG 系統實例已創建")
     
     # 儲存原本的 on_ready
     original_on_ready = bot.on_ready
@@ -4612,22 +4623,27 @@ try:
         
         print("🎮 正在初始化 RPG 系統...")
         
-        # 延遲初始化，確保 Bot 完全就緒
-        await asyncio.sleep(2)
+        # 等待 Bot 完全就緒
+        await asyncio.sleep(3)
         
         # 初始化 RPG 資料庫
         await rpg.initialize()
         
         # 註冊 RPG 指令
-        await rpg.register_commands(bot.tree)
+        if MODULAR_MODE:
+            await register_all_commands(bot.tree, rpg)
+        else:
+            await rpg.register_commands(bot.tree)
         
         # 同步指令
         try:
             synced = await bot.tree.sync()
             print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
             
-            # 確認 RPG 指令是否存在
+            # 列出所有指令
             cmd_names = [cmd.name for cmd in synced]
+            print(f"📋 已同步指令: {', '.join(sorted(cmd_names))}")
+            
             if 'rpg' in cmd_names:
                 print("✅ RPG 指令群組已成功同步！")
             else:
@@ -4636,13 +4652,14 @@ try:
         except Exception as e:
             print(f"❌ 指令同步失敗: {e}")
     
-    print("🔌 RPG 系統載入點已準備")
+    print("🔌 RPG 系統載入完成")
     
 except Exception as e:
-    print(f"⚠️ 未檢測到 RPG 系統模組: {e}")
+    print(f"⚠️ RPG 系統載入失敗: {e}")
+    import traceback
+    traceback.print_exc()
     rpg = None
 
 # ========== 啟動機器人 ==========
 if __name__ == "__main__":
     main()
-
