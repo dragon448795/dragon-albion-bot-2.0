@@ -1492,72 +1492,7 @@ async def profile_slash(interaction: discord.Interaction):
             color=0xFF0000
         )
         await interaction.followup.send(embed=error_embed)
-        
-        # ... 其他程式碼 ...
-        
-    except Exception as e:  # <-- 確保有這個 except 區塊
-        error_embed = discord.Embed(
-            title="❌ 發生錯誤",
-            description=f"無法讀取用戶資料：{str(e)}",
-            color=0xFF0000
-        )
-        await interaction.followup.send(embed=error_embed)
-        
-        if profession_counts:
-            profession_info = ""
-            total_plays = sum(profession_counts.values())
-            for profession, count in profession_counts.items():
-                percentage = (count / total_plays * 100) if total_plays > 0 else 0
-                profession_info += f"**{profession}：** {count}次 ({percentage:.1f}%)\n"
-        else:
-            profession_info = "尚未記錄職業數據"
-        
-        embed.add_field(
-            name="🎮 職業統計",
-            value=profession_info,
-            inline=False
-        )
-        
-        if rating_stats:
-            rating_info = ""
-            total_ratings = sum(rating_stats.values())
-            total_rating_score = 0
-            
-            for rating_type in ["優秀", "良好", "普通", "不合格"]:
-                count = rating_stats.get(rating_type, 0)
-                if count > 0:
-                    percentage = (count / total_ratings * 100) if total_ratings > 0 else 0
-                    score = RATING_SCORES.get(rating_type, 0)
-                    rating_info += f"**{rating_type}：** {count}次 ({percentage:.1f}%)\n"
-                    total_rating_score += count * score
-            
-            if total_ratings > 0:
-                rating_info += f"\n**評核總獲得積分：** {total_rating_score} 分"
-        else:
-            rating_info = "尚未有評核記錄"
-        
-        embed.add_field(
-            name="⭐ 評核統計",
-            value=rating_info,
-            inline=False
-        )
-        
-        embed.add_field(name="用戶ID", value=f"`{user_id}`", inline=True)
-        embed.add_field(name="加入日期", value=join_date_str, inline=True)
-        
-        if interaction.user.avatar:
-            embed.set_thumbnail(url=interaction.user.avatar.url)
-        
-        await interaction.followup.send(embed=embed)
-        
-    except Exception as e:
-        error_embed = discord.Embed(
-            title="❌ 發生錯誤",
-            description=f"無法讀取用戶資料：{str(e)}",
-            color=0xFF0000
-        )
-        await interaction.followup.send(embed=error_embed)
-        
+
 @tree.command(name="giveaway", description="創建抽獎活動")
 @app_commands.describe(
     prize="獎品內容",
@@ -4658,89 +4593,55 @@ def main():
         print(f"❌ 啟動失敗: {e}")
         traceback.print_exc()
 
-if __name__ == "__main__":
-    main()
-
 # ========== RPG 系統整合（完全獨立，不影響原有功能）==========
-try:
-    from rpg_system import RPGSystem, get_rpg_system
-    rpg = get_rpg_system(bot, db, memory_cache)
-    
-    # 儲存原本的 on_ready
-    original_on_ready = bot.on_ready
-    
-    @bot.event
-    async def on_ready():
-        # 先執行原本的 on_ready
-        if original_on_ready:
-            await original_on_ready()
+if __name__ == "__main__":
+    # 這部分會在 bot.run() 之後執行，但我們需要提前導入
+    try:
+        from rpg_system import RPGSystem, get_rpg_system
+        rpg = get_rpg_system(bot, db, memory_cache)
         
-        # ========== 關鍵修正：延遲初始化，確保 Bot 完全就緒 ==========
-        await asyncio.sleep(2)  # 等待 2 秒，確保連接穩定
+        # 儲存原本的 on_ready
+        original_on_ready = bot.on_ready
         
-        # 初始化 RPG
-        await rpg.initialize()
-        
-        # 註冊 RPG 指令
-        await rpg.register_commands(bot.tree)
-        
-        # ========== 只同步 RPG 指令，不影響原有指令 ==========
-        try:
-            # 只同步 rpg 群組
-            await bot.tree.sync(guild=None)  # None = 全域同步
-            print("✅ RPG 指令全域同步完成")
+        @bot.event
+        async def on_ready():
+            # 先執行原本的 on_ready
+            if original_on_ready:
+                await original_on_ready()
             
-            # 驗證指令是否存在
-            rpg_command = bot.tree.get_command('rpg')
-            if rpg_command:
-                print(f"✅ RPG 指令驗證成功: /rpg")
-            else:
-                print(f"❌ RPG 指令驗證失敗")
+            # ========== 延遲初始化，確保 Bot 完全就緒 ==========
+            await asyncio.sleep(2)
+            
+            # 初始化 RPG 資料庫
+            await rpg.initialize()
+            
+            # 註冊 RPG 指令
+            await rpg.register_commands(bot.tree)
+            
+            # ========== 同步所有指令（原有 + RPG）==========
+            try:
+                synced = await bot.tree.sync()
+                print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
                 
-        except Exception as e:
-            print(f"❌ RPG 指令同步失敗: {e}")
-    
-    print("🔌 RPG 系統載入點已準備")
-    
-except ImportError as e:
-    print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
-    rpg = None
-        
-        # ========== 關鍵修正：先註冊指令，再同步 ==========
-        # 註冊 RPG 指令到 tree
-        await rpg.register_commands(bot.tree)
-        print("✅ RPG 指令已註冊到指令樹")
-        
-        # 強制同步所有指令（包括原有的 + RPG）
-        try:
-            # 這裡會同步「所有」已註冊的指令
-            synced = await bot.tree.sync()
-            print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
-            
-            # 列出所有指令名稱
-            cmd_names = [cmd.name for cmd in synced]
-            print(f"📋 已同步指令: {', '.join(cmd_names)}")
-            
-            # 確認 RPG 指令是否存在
-            if 'rpg' in cmd_names:
-                print("✅ RPG 指令群組已成功同步！")
-            else:
-                print("❌ RPG 指令群組同步失敗！")
+                # 列出所有指令名稱
+                cmd_names = [cmd.name for cmd in synced]
+                print(f"📋 已同步指令: {', '.join(cmd_names)}")
                 
-        except Exception as e:
-            print(f"❌ 指令同步失敗: {e}")
+                # 確認 RPG 指令是否存在
+                if 'rpg' in cmd_names:
+                    print("✅ RPG 指令群組已成功同步！")
+                else:
+                    print("❌ RPG 指令群組同步失敗！")
+                    
+            except Exception as e:
+                print(f"❌ 指令同步失敗: {e}")
+        
+        print("🔌 RPG 系統載入點已準備")
+        
+    except ImportError as e:
+        print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
+        print("   如需使用 RPG 功能，請建立 rpg_system.py")
+        rpg = None
     
-    print("🔌 RPG 系統載入點已準備")
-    
-except ImportError as e:
-    print(f"ℹ️ 未檢測到 RPG 系統模組: {e}")
-    rpg = None
-
-
-
-
-
-
-
-
-
+    # 啟動機器人
+    main()
