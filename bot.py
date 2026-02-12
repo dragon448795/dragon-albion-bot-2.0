@@ -4593,7 +4593,6 @@ def main():
         traceback.print_exc()
 
 # ========== RPG 系統整合（完全獨立，不影響原有功能）==========
-# ⚠️ 重要：這段必須放在 main() 外面，不能放在 if __name__ == "__main__" 裡面！
 try:
     print("🔄 正在載入 RPG 系統模組...")
     from rpg_system import RPGSystem, get_rpg_system
@@ -4622,16 +4621,13 @@ try:
         # 註冊 RPG 指令
         await rpg.register_commands(bot.tree)
         
-        # ========== 同步所有指令（原有 + RPG）==========
+        # 同步指令
         try:
             synced = await bot.tree.sync()
             print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
             
-            # 列出所有指令名稱
-            cmd_names = [cmd.name for cmd in synced]
-            print(f"📋 已同步指令: {', '.join(cmd_names)}")
-            
             # 確認 RPG 指令是否存在
+            cmd_names = [cmd.name for cmd in synced]
             if 'rpg' in cmd_names:
                 print("✅ RPG 指令群組已成功同步！")
             else:
@@ -4642,15 +4638,8 @@ try:
     
     print("🔌 RPG 系統載入點已準備")
     
-except ImportError as e:
-    print(f"⚠️ 未檢測到 RPG 系統模組: {e}")
-    print("   如需使用 RPG 功能，請建立 rpg_system.py")
-    rpg = None
-    
 except Exception as e:
-    print(f"❌ RPG 系統載入失敗: {e}")
-    import traceback
-    traceback.print_exc()
+    print(f"⚠️ 未檢測到 RPG 系統模組: {e}")
     rpg = None
 
 # ========== 啟動機器人 ==========
