@@ -226,6 +226,9 @@ class RPGSystem:
   async def register_commands(self, tree):
     """註冊 RPG 專屬指令，並回傳註冊的指令數量"""
     
+    # ========== 關鍵修正：確保 Bot 完全就緒 ==========
+    await self.bot.wait_until_ready()
+    
     # 建立 RPG 指令群組
     rpg_group = app_commands.Group(
         name="rpg", 
@@ -270,9 +273,9 @@ class RPGSystem:
     
     # 將群組加到指令樹
     tree.add_command(rpg_group)
+    print("✅ RPG 系統：指令群組已加入指令樹")
     
-    # 回傳註冊的指令數量
-    return 1  # 一個群組
+    return 1
 
 # ========== 單例模式 ==========
 _rpg_instance = None
