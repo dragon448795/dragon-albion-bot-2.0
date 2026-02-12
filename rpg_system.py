@@ -1,53 +1,229 @@
-# ========== RPG 系統整合（完全獨立，不影響原有功能）==========
-try:
-    print("🔄 正在載入 RPG 系統模組...")
-    from rpg_system import RPGSystem, get_rpg_system
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+小雲ALBION機械人 - RPG 系統模組
+完全獨立，不影響原有積分、抽獎、評核等任何功能
+"""
+
+import discord
+from discord import app_commands
+import json
+import random
+from datetime import datetime
+import asyncpg
+
+class RPGSystem:
+    def __init__(self, bot, db, memory_cache):
+        self.bot = bot
+        self.db = db
+        self.memory_cache = memory_cache
+        print("🎮 RPG 系統實例已創建")
     
-    # 建立全域 RPG 實例
-    rpg = get_rpg_system(bot, db, memory_cache)
-    print("✅ RPG 系統實例已創建")
-    
-    # 儲存原本的 on_ready
-    original_on_ready = bot.on_ready
-    
-    @bot.event
-    async def on_ready():
-        # 先執行原本的 on_ready
-        if original_on_ready:
-            await original_on_ready()
+    async def initialize(self):
+        """初始化 RPG 資料庫表格（完全獨立，不影響原有表格）"""
+        if not self.db.is_connected:
+            print("⚠️ RPG 系統：資料庫未連接，使用記憶體緩存模式")
+            return
         
-        print("🎮 正在初始化 RPG 系統...")
-        
-        # 延遲初始化，確保 Bot 完全就緒
-        await asyncio.sleep(2)
-        
-        # 初始化 RPG 資料庫
-        await rpg.initialize()
-        
-        # 註冊 RPG 指令
-        await rpg.register_commands(bot.tree)
-        
-        # 同步指令
         try:
-            synced = await bot.tree.sync()
-            print(f"✅ 全域指令同步完成，共 {len(synced)} 個指令")
-            
-            # 確認 RPG 指令是否存在
-            cmd_names = [cmd.name for cmd in synced]
-            if 'rpg' in cmd_names:
-                print("✅ RPG 指令群組已成功同步！")
-            else:
-                print("❌ RPG 指令群組同步失敗！")
+            async with self.db.pool.acquire() as conn:
+                
+                # ========== 1. 角色資料表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_characters (
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        level INTEGER DEFAULT 1,
+                        exp INTEGER DEFAULT 0,
+                        exp_next INTEGER DEFAULT 100,
+                        hp INTEGER DEFAULT 100,
+                        max_hp INTEGER DEFAULT 100,
+                        mp INTEGER DEFAULT 50,
+                        max_mp INTEGER DEFAULT 50,
+                        base_vit INTEGER DEFAULT 10,
+                        base_str INTEGER DEFAULT 10,
+                        base_agi INTEGER DEFAULT 10,
+                        base_int INTEGER DEFAULT 10,
+                        base_luck INTEGER DEFAULT 10,
+                        bonus_vit INTEGER DEFAULT 0,
+                        bonus_str INTEGER DEFAULT 0,
+                        bonus_agi INTEGER DEFAULT 0,
+                        bonus_int INTEGER DEFAULT 0,
+                        bonus_luck INTEGER DEFAULT 0,
+                        unspent_stats INTEGER DEFAULT 0,
+                        current_house TEXT DEFAULT '孤兒院',
+                        storage_size INTEGER DEFAULT 20,
+                        coins INTEGER DEFAULT 100,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        last_heal TIMESTAMP DEFAULT NOW(),
+                        last_adventure TIMESTAMP,
+                        PRIMARY KEY (user_id, guild_id)
+                    )
+                ''')
+                
+                # ========== 2. 背包物品表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_inventory (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        item_name TEXT NOT NULL,
+                        item_type TEXT NOT NULL,
+                        quantity INTEGER DEFAULT 1,
+                        rarity TEXT DEFAULT '綠',
+                        equipped BOOLEAN DEFAULT false,
+                        durability INTEGER DEFAULT 100,
+                        max_durability INTEGER DEFAULT 100,
+                        affixes JSONB DEFAULT '[]',
+                        added_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(user_id, guild_id, item_name, rarity, affixes)
+                    )
+                ''')
+                
+                # ========== 3. 裝備欄位表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_equipment_slots (
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        weapon INTEGER DEFAULT NULL,
+                        head INTEGER DEFAULT NULL,
+                        body INTEGER DEFAULT NULL,
+                        shoes INTEGER DEFAULT NULL,
+                        necklace INTEGER DEFAULT NULL,
+                        ring INTEGER DEFAULT NULL,
+                        backpack INTEGER DEFAULT NULL,
+                        PRIMARY KEY (user_id, guild_id)
+                    )
+                ''')
+                
+                # ========== 4. 房屋系統表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_houses (
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        house_type TEXT DEFAULT '孤兒院',
+                        storage_items JSONB DEFAULT '[]',
+                        crafting_facilities JSONB DEFAULT '[]',
+                        upgrade_progress INTEGER DEFAULT 0,
+                        PRIMARY KEY (user_id, guild_id)
+                    )
+                ''')
+                
+                # ========== 5. 隊伍系統表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_parties (
+                        party_id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        leader_id BIGINT NOT NULL,
+                        members JSONB DEFAULT '[]',
+                        current_map TEXT,
+                        current_floor INTEGER DEFAULT 1,
+                        is_active BOOLEAN DEFAULT true,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                ''')
+                
+                # ========== 6. 拍賣行/商店表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_shop_listings (
+                        id SERIAL PRIMARY KEY,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        seller_id BIGINT NOT NULL,
+                        item_id INTEGER NOT NULL,
+                        price INTEGER NOT NULL,
+                        listed_at TIMESTAMP DEFAULT NOW(),
+                        expires_at TIMESTAMP DEFAULT NOW() + INTERVAL '1 day',
+                        is_sold BOOLEAN DEFAULT false
+                    )
+                ''')
+                
+                # ========== 7. 稱號系統表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_titles (
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        title_name TEXT NOT NULL,
+                        unlocked_at TIMESTAMP DEFAULT NOW(),
+                        equipped BOOLEAN DEFAULT false,
+                        PRIMARY KEY (user_id, guild_id, title_name)
+                    )
+                ''')
+                
+                # ========== 8. 冒險紀錄表 ==========
+                await conn.execute('''
+                    CREATE TABLE IF NOT EXISTS rpg_adventure_logs (
+                        id SERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        guild_id BIGINT NOT NULL DEFAULT 0,
+                        map_name TEXT,
+                        floor INTEGER,
+                        monster_killed TEXT,
+                        items_dropped JSONB,
+                        exp_gained INTEGER,
+                        timestamp TIMESTAMP DEFAULT NOW()
+                    )
+                ''')
+                
+                print("✅ RPG 系統：8個獨立資料表初始化完成")
                 
         except Exception as e:
-            print(f"❌ 指令同步失敗: {e}")
+            print(f"❌ RPG 系統：資料庫初始化失敗 - {e}")
     
-    print("🔌 RPG 系統載入點已準備")
-    
-except Exception as e:
-    print(f"⚠️ 未檢測到 RPG 系統模組: {e}")
-    rpg = None
+    async def register_commands(self, tree):
+        """註冊 RPG 專屬指令"""
+        
+        # 建立 RPG 指令群組
+        rpg_group = app_commands.Group(
+            name="rpg", 
+            description="🎮 RPG 冒險系統（獨立於原有功能）"
+        )
+        
+        @rpg_group.command(name="version", description="查看 RPG 系統版本")
+        async def rpg_version(interaction: discord.Interaction):
+            await interaction.response.send_message(
+                "🎮 RPG 系統 v0.1 - 資料庫已準備就緒",
+                ephemeral=True
+            )
+        
+        @rpg_group.command(name="status", description="檢查 RPG 資料庫狀態")
+        async def rpg_status(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+            
+            if not self.db.is_connected:
+                await interaction.followup.send("❌ RPG 系統：資料庫未連接")
+                return
+            
+            try:
+                tables = await self.db.fetch("""
+                    SELECT table_name 
+                    FROM information_schema.tables 
+                    WHERE table_schema = 'public' 
+                    AND table_name LIKE 'rpg_%'
+                """)
+                
+                embed = discord.Embed(
+                    title="🎮 RPG 系統狀態",
+                    color=0x00FF00
+                )
+                
+                embed.add_field(name="📊 RPG 表格數量", value=f"{len(tables)} 個", inline=True)
+                embed.add_field(name="🔌 資料庫連接", value="✅ 正常", inline=True)
+                
+                await interaction.followup.send(embed=embed)
+                
+            except Exception as e:
+                await interaction.followup.send(f"❌ 檢查失敗: {e}")
+        
+        # 將群組加到指令樹
+        tree.add_command(rpg_group)
+        print("✅ RPG 系統：指令註冊完成 (/rpg version, /rpg status)")
+        return 1
 
-# ========== 啟動機器人 ==========
-if __name__ == "__main__":
-    main()
+# ========== 單例模式 - 沒有任何執行代碼，只有定義 ==========
+_rpg_instance = None
+
+def get_rpg_system(bot=None, db=None, memory_cache=None):
+    global _rpg_instance
+    if _rpg_instance is None and bot is not None:
+        _rpg_instance = RPGSystem(bot, db, memory_cache)
+    return _rpg_instance
